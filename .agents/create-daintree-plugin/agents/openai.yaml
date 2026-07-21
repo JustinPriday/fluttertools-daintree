@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Daintree Plugin"
+  short_description: "Design, build, test, package, and diagnose Daintree plugins."
+  default_prompt: "Create or extend a Daintree plugin using the documented framework, proven production patterns, and compatibility checks."
