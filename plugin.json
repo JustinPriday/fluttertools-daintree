@@ -1,0 +1,81 @@
+{
+  "name": "justinpriday.flutter-tools",
+  "version": "0.2.1",
+  "displayName": "Flutter Tools",
+  "description": "Worktree-bound Flutter devices, run controls, console, DevTools, and screenshots.",
+  "tagline": "A focused Flutter cockpit inside every Daintree worktree.",
+  "category": "workspace",
+  "main": "dist/index.js",
+  "engines": { "daintree": ">=0.28.0" },
+  "capabilities": ["shell:exec", "fs:project-read", "fs:user-data-write", "clipboard:write"],
+  "scopes": { "fs": { "allowedPaths": ["${project}", "${worktree}"] } },
+  "contributes": {
+    "panels": [
+      {
+        "id": "workspace",
+        "name": "Flutter Tools",
+        "iconId": "monitor-play",
+        "color": "var(--theme-category-cyan)",
+        "showInPalette": false
+      }
+    ],
+    "views": [
+      {
+        "id": "workspace",
+        "componentPath": "dist/panel-0.2.1.js",
+        "location": "panel",
+        "iconId": "monitor-play"
+      }
+    ],
+    "commands": [
+      {
+        "id": "open",
+        "title": "Flutter: Open Tools",
+        "description": "Open Flutter Tools bound to the visible worktree.",
+        "category": "Flutter",
+        "kind": "command",
+        "danger": "safe",
+        "keywords": ["flutter", "dart", "device", "run", "console"]
+      },
+      {
+        "id": "open-another",
+        "title": "Flutter: Open Another Tools Panel",
+        "description": "Open another independent Flutter Tools panel for the visible worktree.",
+        "category": "Flutter",
+        "kind": "command",
+        "danger": "safe",
+        "keywords": ["flutter", "multi-root", "device"]
+      }
+    ],
+    "toolbarButtons": [
+      {
+        "id": "open-tools",
+        "label": "Open Flutter Tools",
+        "iconId": "monitor-play",
+        "actionId": "justinpriday.flutter-tools.open",
+        "priority": 3
+      }
+    ],
+    "settings": [
+      {
+        "id": "flutterSdkPath",
+        "type": "directory",
+        "scope": "user",
+        "label": "Flutter SDK directory",
+        "description": "Optional Flutter SDK directory. FVM and PATH are discovered automatically when empty.",
+        "default": "",
+        "mustExist": true
+      },
+      {
+        "id": "projectSearchDepth",
+        "type": "number",
+        "scope": "user",
+        "label": "Project search depth",
+        "description": "Maximum folder depth used to discover nested Flutter applications.",
+        "default": 5,
+        "min": 1,
+        "max": 12
+      }
+    ]
+  }
+}
