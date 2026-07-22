@@ -4,7 +4,7 @@ Worktree-aware Flutter development tools inside [Daintree](https://github.com/da
 
 Flutter Tools gives each Daintree worktree a persistent Flutter cockpit. Discover nested apps and connected devices, run and control several device sessions, inspect live output, open DevTools, and capture screenshots without switching to another IDE.
 
-> Flutter Tools was authored entirely inside Daintree—a plugin built from within the environment it extends.
+> **Made in Daintree.** Flutter Tools was authored entirely inside Daintree—a plugin built from within the environment it extends.
 
 > [!IMPORTANT]
 > Flutter Tools is preparing for its first public prerelease. Interfaces and installation details may change while the Daintree plugin framework evolves.

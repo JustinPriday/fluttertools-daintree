@@ -235,5 +235,7 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     host.registerHandler("workspace.disconnect", { args: z.object({ panelId: z.string().min(1) }), result: operationResultSchema }, async (_ctx, args) => { const runtime = runtimes.get(args.panelId); if (!runtime) return { ok: false, message: "Panel was already disconnected" }; for (const [deviceId, session] of runtime.sessions) flush(args.panelId, deviceId, session); scheduleDisconnect(args.panelId, runtime); return { ok: true, message: "Panel hidden; Flutter sessions retained for reconnect" }; }),
   ]);
 
-  return () => { for (const panelId of [...runtimes.keys()]) void disposeRuntime(panelId); };
+  return async () => {
+    await Promise.all([...runtimes.keys()].map((panelId) => disposeRuntime(panelId)));
+  };
 }
