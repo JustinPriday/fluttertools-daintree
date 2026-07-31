@@ -24,4 +24,10 @@ describe("Flutter Tools panel layout policy", () => {
     expect(panelStyles).toContain(".ft-shot{position:relative");
     expect(panelStyles).toContain(".ft-shot-delete{position:absolute;top:7px;right:7px");
   });
+
+  it("wraps long recovery diagnostics instead of truncating them", () => {
+    expect(panelStyles).toContain(".ft-error{min-height:34px;max-height:min(132px,35%)");
+    expect(panelStyles).toContain(".ft-error span{min-width:0;flex:1;white-space:normal;overflow-wrap:anywhere");
+    expect(panelStyles).not.toContain(".ft-error span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}");
+  });
 });

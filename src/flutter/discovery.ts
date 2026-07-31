@@ -3,6 +3,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import type { FlutterProject } from "../shared/contracts.js";
+import type { FlutterDevice } from "../shared/contracts.js";
+import { parseFlutterDeviceList } from "./device.js";
 
 const IGNORED = new Set([".git", ".dart_tool", ".idea", ".vscode", "build", "dist", "node_modules", "Pods", "DerivedData"]);
 const execFileAsync = promisify(execFile);
@@ -48,11 +50,20 @@ export async function resolveFlutterExecutable(worktreePath: string, configuredS
 
 export async function inspectFlutterVersion(executable: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(executable, ["--version", "--machine"], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFileAsync(executable, ["--version", "--machine"], { timeout: 20_000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024 });
     const value = JSON.parse(stdout) as { frameworkVersion?: unknown; dartSdkVersion?: unknown; channel?: unknown };
     if (typeof value.frameworkVersion !== "string") return null;
     const channel = typeof value.channel === "string" ? ` ${value.channel}` : "";
     const dart = typeof value.dartSdkVersion === "string" ? ` · Dart ${value.dartSdkVersion}` : "";
     return `Flutter ${value.frameworkVersion}${channel}${dart}`;
   } catch { return null; }
+}
+
+export async function discoverFlutterDevices(executable: string): Promise<FlutterDevice[]> {
+  const { stdout } = await execFileAsync(executable, ["devices", "--machine"], {
+    timeout: 30_000,
+    killSignal: "SIGKILL",
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  return parseFlutterDeviceList(JSON.parse(stdout));
 }

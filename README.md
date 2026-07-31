@@ -26,10 +26,10 @@ This is especially useful when several worktrees run different revisions of an a
 - Flutter SDK resolution from plugin settings, a worktree-local FVM SDK, or `PATH`.
 - Live physical-device, emulator, simulator, desktop, and web target discovery through `flutter daemon`.
 - Independent debug sessions for multiple devices in one panel.
-- Run, Stop, Detach, Hot Reload, and Hot Restart controls.
+- Run, Stop, Detach, Hot Reload, Hot Restart, and confirmed Reinstall & Restart controls.
 - Structured per-device console with bounded history, filtering, copy, clear, and follow-tail controls.
 - Session-specific Flutter DevTools launch inside Daintree's browser.
-- Device screenshot capture, preview, deletion, system opening, and best-effort image copying.
+- Device screenshot capture, preview, deletion, scoped system opening, and native image copying.
 - Persistent worktree and Flutter-project binding across panel restoration.
 - Native Daintree panel focus, drag, reorder, maximise, close, and status badges.
 
@@ -37,7 +37,7 @@ This is especially useful when several worktrees run different revisions of an a
 
 | Requirement | Current support |
 | --- | --- |
-| Daintree | 0.28.0 or newer |
+| Daintree | 0.29.0 or newer |
 | Node.js for development | 22.13.0 or newer from the Node 22 release line |
 | Flutter | A locally installed SDK available through settings, `.fvm/flutter_sdk`, or `PATH` |
 | Flutter project | A `pubspec.yaml` with a Flutter SDK dependency inside the bound worktree |
@@ -64,25 +64,26 @@ Opening Flutter Tools binds the panel to the visible worktree. The plugin search
 - Select a target from the device picker, then choose **Run** to start a debug session.
 - Switch devices without stopping sessions already running on other targets.
 - Use **Hot Reload** or **Hot Restart** when the selected debug target supports it.
+- Long-press **Hot Restart** to confirm **Reinstall & Restart**, which permanently removes all app data stored on the Android or iOS device before launching the same run configuration.
 - Filter, copy, or clear the selected device's console. Scroll upward to pause follow-tail, then choose **Resume live tail** to return to current output.
 - Open the connected session in Flutter DevTools after its VM service becomes available.
 - Capture a screenshot when the selected device supports it, then preview, open, copy, or delete the saved PNG.
 - Choose **Detach** to leave the app running while ending the Flutter tool connection.
 
-Run, Stop, Detach, Hot Reload, and Hot Restart act on real local Flutter processes. Confirm that the selected project and device are correct before interrupting a session.
+Run, Stop, Detach, Hot Reload, Hot Restart, and Reinstall & Restart act on real local Flutter processes. Reinstall & Restart requires confirmation because it removes the selected device's installed app and local data.
 
 ## Permissions and trust
 
 The manifest declares:
 
-- `shell:exec` for Flutter daemon and run processes, plus opening plugin-owned screenshots.
+- `shell:exec` for Flutter daemon and run processes.
 - `fs:project-read` to discover Flutter projects within the current project or worktree.
 - `fs:user-data-write` to save and delete captured screenshots.
-- `clipboard:write` to copy console text.
+- `clipboard:write` to copy console text and screenshot PNGs.
 
-Flutter's machine protocols require bidirectional standard input and output, which Daintree 0.28 does not expose through its managed process API. The plugin worker therefore starts fixed Flutter commands directly with argument arrays and `shell: false`. It also uses a fixed operating-system command to open only screenshots inside its own data directory.
+Flutter's machine protocols require bidirectional standard input and structured output. Daintree 0.29 exposes worker-readable output only for piped processes, whose stdin is closed, while writable stdin requires PTY mode and merges the streams. Until Flutter machine-mode compatibility with that PTY transport is proven, the plugin worker starts fixed Flutter commands directly with argument arrays and `shell: false`.
 
-Image clipboard support is best effort because Daintree's public plugin clipboard API currently supports text only. A failed image copy is reported in the panel; opening the saved PNG remains available.
+Screenshot copying uses Daintree's bounded, host-mediated image clipboard API. Opening a saved PNG uses Daintree's plugin-scoped system API, confined to Flutter Tools' own user-data directory.
 
 Flutter Tools does not include telemetry or a remote service. Flutter command output and screenshots remain local to the Daintree plugin process and its user-data directory.
 
@@ -110,7 +111,7 @@ The current source setup expects a Daintree checkout at `../../Daintree` because
 ```text
 Developer/
 └── Electron/
-    ├── Daintree/                    # Daintree v0.28.0 or compatible newer checkout
+    ├── Daintree/                    # Daintree v0.29.0 or compatible newer checkout
     └── DaintreePlugins/
         └── FlutterDaintree/         # this repository
 ```
@@ -119,7 +120,7 @@ Prepare Daintree first:
 
 ```sh
 cd ../../Daintree
-git checkout v0.28.0
+git checkout v0.29.0
 npm install
 npm run packages:build
 ```
@@ -195,10 +196,8 @@ tools/                       Deterministic build, packaging, and release helpers
 - The panel currently launches debug mode with Flutter's default entrypoint and arguments.
 - Emulator and simulator creation or launch is not included; start them with existing platform or Flutter tools.
 - Attaching to an app started outside Flutter Tools is not included.
-- Screenshot availability is device-dependent, and image clipboard copying is best effort.
+- Screenshot availability remains device-dependent.
 - Screenshots are kept in the current panel view only until it unmounts, though their PNG files remain in plugin user data until deleted.
-- Hidden panels retain active resources through a bounded reconnect lease because Daintree 0.28 does not distinguish temporary view unmount from permanent panel deletion.
-- Daintree treats every action from a plugin with process or write authority as confirmation-worthy, so opening Flutter Tools may display a capability confirmation.
 
 ## Project identity
 

@@ -1,27 +1,12 @@
 import { EventEmitter } from "node:events";
 import { FlutterMachineProcess, type MachineMessage } from "./machine.js";
-import { deviceSchema, type FlutterDevice } from "../shared/contracts.js";
+import { parseFlutterDevice, parseFlutterDeviceList } from "./device.js";
+import type { FlutterDevice } from "../shared/contracts.js";
 
 export const FLUTTER_DAEMON_ARGS = ["daemon"] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function parseDevice(value: unknown): FlutterDevice | null {
-  const raw = asRecord(value);
-  const caps = asRecord(raw?.capabilities);
-  const parsed = deviceSchema.safeParse({
-    id: raw?.id,
-    name: raw?.name,
-    platform: raw?.platform,
-    category: typeof raw?.category === "string" ? raw.category : null,
-    emulator: raw?.emulator === true,
-    ephemeral: raw?.ephemeral === true,
-    sdk: typeof raw?.sdk === "string" ? raw.sdk : null,
-    capabilities: { hotReload: caps?.hotReload === true, hotRestart: caps?.hotRestart === true, screenshot: caps?.screenshot === true, fastStart: caps?.fastStart === true },
-  });
-  return parsed.success ? parsed.data : null;
 }
 
 export class FlutterDaemon extends EventEmitter {
@@ -31,7 +16,7 @@ export class FlutterDaemon extends EventEmitter {
   private resolveReady: (() => void) | null = null;
   private rejectReady: ((error: Error) => void) | null = null;
 
-  constructor(executable: string) {
+  constructor(executable: string, private readonly requestTimeoutMs = 30_000) {
     super();
     this.machine = new FlutterMachineProcess({ executable, args: [...FLUTTER_DAEMON_ARGS] });
     this.machine.on("message", (message: MachineMessage) => this.onMessage(message));
@@ -40,23 +25,32 @@ export class FlutterDaemon extends EventEmitter {
     this.machine.on("exit", (code) => { this.rejectReady?.(new Error(`Flutter daemon exited with code ${code ?? "unknown"}`)); this.devices.clear(); this.emit("devices", []); });
   }
 
+  get running(): boolean { return this.machine.running; }
+
   async start(): Promise<void> {
     if (this.machine.running) return;
     this.readyPromise = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
     this.machine.start();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    try { await Promise.race([this.readyPromise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Flutter daemon did not become ready")), 20_000); })]); }
-    finally { if (timer) clearTimeout(timer); this.resolveReady = null; this.rejectReady = null; }
-    await this.machine.request("device.enable");
-    await this.refreshDevices();
+    try {
+      await Promise.race([this.readyPromise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Flutter daemon did not become ready")), 20_000); })]);
+      await this.machine.request("device.enable", {}, this.requestTimeoutMs);
+      await this.refreshDevices();
+    } catch (error) {
+      await this.machine.close().catch(() => {});
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.resolveReady = null;
+      this.rejectReady = null;
+    }
   }
 
   listDevices(): FlutterDevice[] { return [...this.devices.values()].sort((a, b) => a.name.localeCompare(b.name)); }
 
   async refreshDevices(): Promise<FlutterDevice[]> {
-    const response = await this.machine.request("device.getDevices");
-    const next = new Map<string, FlutterDevice>();
-    if (Array.isArray(response)) for (const item of response) { const device = parseDevice(item); if (device) next.set(device.id, device); }
+    const response = await this.machine.request("device.getDevices", {}, this.requestTimeoutMs);
+    const next = new Map(parseFlutterDeviceList(response).map((device) => [device.id, device]));
     this.devices = next;
     const devices = this.listDevices();
     this.emit("devices", devices);
@@ -73,7 +67,7 @@ export class FlutterDaemon extends EventEmitter {
 
   private onMessage(message: MachineMessage): void {
     if (message.event === "daemon.connected") this.resolveReady?.();
-    if (message.event === "device.added") { const device = parseDevice(message.params); if (device) this.devices.set(device.id, device); }
+    if (message.event === "device.added") { const device = parseFlutterDevice(message.params); if (device) this.devices.set(device.id, device); }
     if (message.event === "device.removed") { const raw = asRecord(message.params); if (typeof raw?.id === "string") this.devices.delete(raw.id); }
     if (message.event?.startsWith("device.")) this.emit("devices", this.listDevices());
     if (message.event === "daemon.logMessage") this.emit("log", JSON.stringify(message.params));

@@ -1,8 +1,8 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { discoverFlutterProjects, resolveFlutterExecutable } from "./discovery.js";
+import { discoverFlutterDevices, discoverFlutterProjects, resolveFlutterExecutable } from "./discovery.js";
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map((entry) => rm(entry, { recursive: true, force: true }))); });
@@ -25,5 +25,16 @@ describe("Flutter discovery", () => {
     const sdk = path.join(root, "sdk"); await mkdir(path.join(sdk, "bin"), { recursive: true });
     await writeFile(path.join(sdk, "bin", "flutter"), "");
     await expect(resolveFlutterExecutable(root, sdk)).resolves.toEqual({ executable: path.join(sdk, "bin", "flutter"), source: "setting" });
+  });
+
+  it.skipIf(process.platform === "win32")("discovers devices through the one-shot machine command", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "flutter-tools-devices-")); temporary.push(root);
+    const executable = path.join(root, "flutter-fixture");
+    const payload = [{ name: "Pixel", id: "pixel", isSupported: true, targetPlatform: "android-arm64", emulator: false, sdk: "Android 16", capabilities: { hotReload: true, hotRestart: true, screenshot: true } }];
+    await writeFile(executable, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(payload))});\n`);
+    await chmod(executable, 0o755);
+    await expect(discoverFlutterDevices(executable)).resolves.toEqual([
+      expect.objectContaining({ id: "pixel", name: "Pixel", platform: "android-arm64", sdk: "Android 16" }),
+    ]);
   });
 });

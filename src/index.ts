@@ -1,12 +1,13 @@
 import path from "node:path";
-import { spawn } from "node:child_process";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import type { PluginHostApi, PluginPanelBadge, PluginQuickPickItem, PluginWorktreeSnapshot } from "@daintreehq/plugin-sdk";
 import { z } from "zod";
 import { FlutterDaemon } from "./flutter/daemon.js";
-import { discoverFlutterProjects, inspectFlutterVersion, resolveFlutterExecutable } from "./flutter/discovery.js";
+import { supportsAppReinstall } from "./flutter/device.js";
+import { discoverFlutterDevices, discoverFlutterProjects, inspectFlutterVersion, resolveFlutterExecutable } from "./flutter/discovery.js";
 import { FlutterRunSession } from "./flutter/runSession.js";
+import { uninstallFlutterApp } from "./flutter/uninstall.js";
 import { ConsoleBuffer } from "./shared/consoleBuffer.js";
 import {
   consoleBatchSchema, controlArgsSchema, devicePanelArgsSchema, flutterPanelBindingSchema, operationResultSchema, panelArgsSchema,
@@ -24,13 +25,15 @@ interface PanelRuntime {
   daemon: FlutterDaemon | null;
   devices: FlutterWorkspaceSnapshot["devices"];
   selectedDeviceId: string | null;
+  toolError: string | null;
+  refreshPromise: Promise<void> | null;
   sessions: Map<string, DeviceRuntime>;
-  disconnectTimer: ReturnType<typeof setTimeout> | null;
-  connected: boolean;
 }
 
 interface DeviceRuntime {
   run: FlutterRunSession | null;
+  launchConfig: { mode: "debug" | "profile" | "release"; entrypoint?: string; extraArgs: string[] } | null;
+  launchPromise: Promise<void> | null;
   console: ConsoleBuffer;
   pendingRecords: ConsoleRecord[];
   batchTimer: ReturnType<typeof setTimeout> | null;
@@ -46,23 +49,6 @@ function screenshotDirectory(pluginId: string): string { return path.resolve(hom
 export function isOwnedScreenshotPath(pluginId: string, filePath: string): boolean {
   const resolved = path.resolve(filePath);
   return path.dirname(resolved) === screenshotDirectory(pluginId) && path.extname(resolved).toLowerCase() === ".png";
-}
-
-interface ScreenshotSystemCommand { command: string; args: string[] }
-
-export function screenshotOpenCommand(platform: NodeJS.Platform, filePath: string): ScreenshotSystemCommand {
-  if (platform === "darwin") return { command: "/usr/bin/open", args: [filePath] };
-  if (platform === "win32") return { command: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", "Start-Process -FilePath $args[0]", filePath] };
-  return { command: "xdg-open", args: [filePath] };
-}
-
-export const IDLE_PANEL_LEASE_MS = 30 * 60 * 1_000;
-export const ACTIVE_PANEL_LEASE_MS = 12 * 60 * 60 * 1_000;
-
-export function panelLeaseMs(state: FlutterWorkspaceSnapshot["run"]["state"]): number {
-  return ["starting", "running", "reloading", "restarting", "stopping"].includes(state)
-    ? ACTIVE_PANEL_LEASE_MS
-    : IDLE_PANEL_LEASE_MS;
 }
 
 function isActiveState(state: FlutterWorkspaceSnapshot["run"]["state"]): boolean {
@@ -124,15 +110,9 @@ function badge(runtime: PanelRuntime): PluginPanelBadge {
 export async function activate(host: PluginHostApi): Promise<() => void> {
   const runtimes = new Map<string, PanelRuntime>();
 
-  const launchSystemCommand = async ({ command, args }: ScreenshotSystemCommand): Promise<void> => {
-    const child = spawn(command, args, { detached: true, stdio: "ignore", shell: false });
-    await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
-    child.unref();
-  };
-
   const getDeviceRuntime = (runtime: PanelRuntime, deviceId: string): DeviceRuntime => {
     const existing = runtime.sessions.get(deviceId); if (existing) return existing;
-    const created: DeviceRuntime = { run: null, console: new ConsoleBuffer(), pendingRecords: [], batchTimer: null, sequence: 0 };
+    const created: DeviceRuntime = { run: null, launchConfig: null, launchPromise: null, console: new ConsoleBuffer(), pendingRecords: [], batchTimer: null, sequence: 0 };
     runtime.sessions.set(deviceId, created); return created;
   };
 
@@ -141,6 +121,7 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     return snapshotSchema.parse({
       binding: runtime.binding, projects: runtime.projects, devices: runtime.devices,
       selectedDeviceId: runtime.selectedDeviceId, sdk: runtime.executable,
+      toolError: runtime.toolError,
       run: selected?.run?.getSnapshot() ?? emptyRun(),
       sessions: [...runtime.sessions.entries()].map(([deviceId, session]) => { const run = session.run?.getSnapshot() ?? emptyRun(); return { deviceId, state: run.state, appId: run.appId, startedAt: run.startedAt }; }),
       console: selected?.console.snapshot() ?? [], sequence: selected?.sequence ?? 0,
@@ -169,26 +150,133 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     ]);
   };
 
+  const startDeviceRun = async (
+    panelId: string,
+    runtime: PanelRuntime,
+    deviceId: string,
+    config: NonNullable<DeviceRuntime["launchConfig"]>,
+    reinstall = false,
+  ): Promise<void> => {
+    const deviceRuntime = getDeviceRuntime(runtime, deviceId);
+    if (deviceRuntime.launchPromise) throw new Error("A launch operation is already in progress for this device");
+    const launch = (async () => {
+      if (!runtime.binding.flutterProjectPath) throw new Error("Select a Flutter project first");
+      const device = runtime.devices.find((candidate) => candidate.id === deviceId);
+      if (!device) throw new Error("Selected Flutter device is no longer available");
+      if (reinstall && !supportsAppReinstall(device)) throw new Error("Reinstall & Restart is supported for Android and iOS devices only");
+      if (!runtime.executable) throw new Error("Flutter SDK unavailable");
+      await deviceRuntime.run?.stop();
+      deviceRuntime.console.clear();
+      deviceRuntime.pendingRecords = [];
+      deviceRuntime.sequence = 0;
+      deviceRuntime.launchConfig = { ...config, extraArgs: [...config.extraArgs] };
+      append(panelId, runtime, deviceId, "system", reinstall ? "Reinstall & Restart: removing the installed app and its local data." : "Starting Flutter application.");
+      await publish(panelId, runtime);
+      if (reinstall) {
+        await uninstallFlutterApp({
+          executable: runtime.executable.executable,
+          projectPath: runtime.binding.flutterProjectPath,
+          deviceId,
+          mode: config.mode,
+          extraArgs: config.extraArgs,
+          onOutput: (stream, text) => append(panelId, runtime, deviceId, stream, text),
+        });
+        append(panelId, runtime, deviceId, "system", "Uninstall complete. Launching the Flutter application.");
+      }
+      const session = new FlutterRunSession({
+        executable: runtime.executable.executable,
+        projectPath: runtime.binding.flutterProjectPath,
+        deviceId,
+        mode: config.mode,
+        entrypoint: config.entrypoint,
+        extraArgs: config.extraArgs,
+      });
+      deviceRuntime.run = session;
+      session.on("output", (stream: ConsoleRecord["stream"], text: string) => append(panelId, runtime, deviceId, stream, text));
+      session.on("state", () => { void publish(panelId, runtime).catch(() => {}); });
+      session.start();
+      await publish(panelId, runtime);
+    })();
+    deviceRuntime.launchPromise = launch;
+    try { await launch; } finally { if (deviceRuntime.launchPromise === launch) deviceRuntime.launchPromise = null; }
+  };
+
+  const applyDevices = (runtime: PanelRuntime, devices: FlutterWorkspaceSnapshot["devices"]): void => {
+    runtime.devices = devices;
+    if (!runtime.selectedDeviceId || !devices.some((item) => item.id === runtime.selectedDeviceId)) {
+      runtime.selectedDeviceId = devices[0]?.id ?? null;
+    }
+  };
+
+  const attachDaemon = (panelId: string, runtime: PanelRuntime): FlutterDaemon => {
+    const daemon = new FlutterDaemon(runtime.executable!.executable);
+    runtime.daemon = daemon;
+    daemon.on("devices", (devices: FlutterWorkspaceSnapshot["devices"]) => {
+      applyDevices(runtime, devices);
+      void publish(panelId, runtime).catch(() => {});
+    });
+    daemon.on("log", (text: string) => {
+      if (runtime.selectedDeviceId) append(panelId, runtime, runtime.selectedDeviceId, "tool", text);
+    });
+    return daemon;
+  };
+
+  const discoveryFailureMessage = (daemonError: unknown, fallbackError: unknown): string => {
+    const detail = `Flutter daemon: ${errorMessage(daemonError)}. One-shot discovery: ${errorMessage(fallbackError)}.`.replace(/\s+/g, " ").trim();
+    if (process.platform !== "darwin") return detail;
+    const timedOut = /timed out|sigkill|command failed/i.test(detail);
+    return timedOut
+      ? "Flutter device discovery did not respond before the timeout. Run `mdutil -s /`. If it says “Spotlight server is disabled,” open System Settings → Spotlight → Search Privacy, remove Macintosh HD, then press Refresh."
+      : `${detail} On macOS, also check \`mdutil -s /\`; disabled Spotlight can block Flutter startup.`;
+  };
+
+  const performDeviceRefresh = async (panelId: string, runtime: PanelRuntime): Promise<void> => {
+    if (!runtime.executable) throw new Error("Flutter SDK unavailable");
+    let daemon = runtime.daemon;
+    if (!daemon?.running) {
+      await daemon?.dispose().catch(() => {});
+      daemon = attachDaemon(panelId, runtime);
+    }
+
+    const daemonAttempt = daemon.running ? daemon.refreshDevices() : daemon.start().then(() => daemon.listDevices());
+    const fallbackAttempt = discoverFlutterDevices(runtime.executable.executable);
+    const [daemonResult, fallbackResult] = await Promise.allSettled([daemonAttempt, fallbackAttempt]);
+
+    if (fallbackResult.status === "fulfilled") applyDevices(runtime, fallbackResult.value);
+    if (daemonResult.status === "rejected") {
+      await daemon.dispose().catch(() => {});
+      if (runtime.daemon === daemon) runtime.daemon = null;
+    }
+
+    if (daemonResult.status === "rejected" && fallbackResult.status === "rejected") {
+      runtime.toolError = discoveryFailureMessage(daemonResult.reason, fallbackResult.reason);
+    } else if (daemonResult.status === "rejected") {
+      runtime.toolError = `Live Flutter device monitoring is unavailable (${errorMessage(daemonResult.reason)}). Using one-shot device discovery; Refresh retries the daemon.`;
+    } else {
+      runtime.toolError = null;
+    }
+  };
+
+  const refreshDeviceSources = (panelId: string, runtime: PanelRuntime): Promise<void> => {
+    if (runtime.refreshPromise) return runtime.refreshPromise;
+    const refresh = performDeviceRefresh(panelId, runtime);
+    runtime.refreshPromise = refresh;
+    const clear = (): void => { if (runtime.refreshPromise === refresh) runtime.refreshPromise = null; };
+    void refresh.then(clear, clear);
+    return refresh;
+  };
+
   const disposeRuntime = async (panelId: string): Promise<boolean> => {
     const runtime = runtimes.get(panelId); if (!runtime) return false;
     runtimes.delete(panelId);
     for (const [deviceId, session] of runtime.sessions) flush(panelId, deviceId, session);
-    if (runtime.disconnectTimer) clearTimeout(runtime.disconnectTimer);
     await Promise.all([...runtime.sessions.values()].map((session) => session.run?.stop().catch(() => {})));
     await runtime.daemon?.dispose().catch(() => {});
     return true;
   };
 
-  const scheduleDisconnect = (panelId: string, runtime: PanelRuntime): void => {
-    runtime.connected = false;
-    if (runtime.disconnectTimer) clearTimeout(runtime.disconnectTimer);
-    const active = [...runtime.sessions.values()].some((session) => isActiveState(session.run?.getSnapshot().state ?? "idle"));
-    runtime.disconnectTimer = setTimeout(() => { void disposeRuntime(panelId); }, active ? ACTIVE_PANEL_LEASE_MS : IDLE_PANEL_LEASE_MS);
-    runtime.disconnectTimer.unref?.();
-  };
-
   const getRuntime = async (panelId: string, initialArgs?: Record<string, unknown>): Promise<PanelRuntime> => {
-    const existing = runtimes.get(panelId); if (existing) { existing.connected = true; if (existing.disconnectTimer) clearTimeout(existing.disconnectTimer); existing.disconnectTimer = null; return existing; }
+    const existing = runtimes.get(panelId); if (existing) return existing;
     const binding = await resolveBinding(host, panelId, initialArgs);
     const depthSetting = await host.settings.get<unknown>("projectSearchDepth");
     const projects = await discoverFlutterProjects(binding.worktreePath, typeof depthSetting === "number" ? depthSetting : 5);
@@ -197,13 +285,10 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     const sdkSetting = await host.settings.get<unknown>("flutterSdkPath");
     const resolvedExecutable = await resolveFlutterExecutable(binding.worktreePath, typeof sdkSetting === "string" ? sdkSetting : undefined);
     const executable = { ...resolvedExecutable, version: await inspectFlutterVersion(resolvedExecutable.executable) };
-    const runtime: PanelRuntime = { binding, projects, executable, daemon: null, devices: [], selectedDeviceId: null, sessions: new Map(), disconnectTimer: null, connected: true };
+    const runtime: PanelRuntime = { binding, projects, executable, daemon: null, devices: [], selectedDeviceId: null, toolError: null, refreshPromise: null, sessions: new Map() };
     runtimes.set(panelId, runtime);
     await saveBinding(host, panelId, binding);
-    const daemon = new FlutterDaemon(executable.executable); runtime.daemon = daemon;
-    daemon.on("devices", (devices: FlutterWorkspaceSnapshot["devices"]) => { runtime.devices = devices; if (!runtime.selectedDeviceId || !devices.some((item) => item.id === runtime.selectedDeviceId)) runtime.selectedDeviceId = devices[0]?.id ?? null; void publish(panelId, runtime).catch(() => {}); });
-    daemon.on("log", (text: string) => { if (runtime.selectedDeviceId) append(panelId, runtime, runtime.selectedDeviceId, "tool", text); });
-    try { await daemon.start(); } catch (error) { if (runtime.selectedDeviceId) append(panelId, runtime, runtime.selectedDeviceId, "system", `Flutter daemon: ${errorMessage(error)}`); }
+    await refreshDeviceSources(panelId, runtime);
     return runtime;
   };
 
@@ -218,21 +303,23 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
   };
 
   await Promise.all([
-    host.registerAction({ id: "open", title: "Flutter: Open Tools", description: "Open Flutter Tools bound to the visible worktree.", category: "Flutter", kind: "command", danger: "safe" }, () => open(true)),
-    host.registerAction({ id: "open-another", title: "Flutter: Open Another Tools Panel", description: "Open another independent Flutter Tools panel.", category: "Flutter", kind: "command", danger: "safe" }, () => open(false)),
+    host.onDidChangePanelLifecycle((event) => { if (event.phase === "removed") void disposeRuntime(event.panelId); }),
+    host.registerAction({ id: "open", title: "Flutter: Open Tools", description: "Open Flutter Tools bound to the visible worktree.", category: "Flutter", kind: "command", danger: "safe", requires: [] }, () => open(true)),
+    host.registerAction({ id: "open-another", title: "Flutter: Open Another Tools Panel", description: "Open another independent Flutter Tools panel.", category: "Flutter", kind: "command", danger: "safe", requires: [] }, () => open(false)),
     host.registerHandler("workspace.connect", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await publish(args.panelId, runtime); return snapshotFor(runtime); }),
-    host.registerHandler("workspace.refresh", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const depth = await host.settings.get<unknown>("projectSearchDepth"); runtime.projects = await discoverFlutterProjects(runtime.binding.worktreePath, typeof depth === "number" ? depth : 5); if (!runtime.daemon) throw new Error("Flutter daemon unavailable"); await runtime.daemon.refreshDevices(); await publish(args.panelId, runtime); return snapshotFor(runtime); }),
+    host.registerHandler("workspace.refresh", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const depth = await host.settings.get<unknown>("projectSearchDepth"); runtime.projects = await discoverFlutterProjects(runtime.binding.worktreePath, typeof depth === "number" ? depth : 5); await refreshDeviceSources(args.panelId, runtime); await publish(args.panelId, runtime); return snapshotFor(runtime); }),
     host.registerHandler("project.select", { args: setProjectArgsSchema, result: flutterPanelBindingSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const project = runtime.projects.find((item) => path.resolve(item.path) === path.resolve(args.projectPath)); if (!project) throw new Error("Selected Flutter project is outside the discovered worktree projects"); if ([...runtime.sessions.values()].some((session) => isActiveState(session.run?.getSnapshot().state ?? "idle"))) throw new Error("Stop all running applications before changing Flutter project"); for (const [deviceId, session] of runtime.sessions) { flush(args.panelId, deviceId, session); if (session.batchTimer) clearTimeout(session.batchTimer); } runtime.sessions.clear(); runtime.binding = { ...runtime.binding, flutterProjectPath: project.path }; await saveBinding(host, args.panelId, runtime.binding); await publish(args.panelId, runtime); return runtime.binding; }),
     host.registerHandler("device.select", { args: selectDeviceArgsSchema, result: snapshotSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.devices.some((item) => item.id === args.deviceId)) throw new Error("Selected Flutter device is no longer available"); runtime.selectedDeviceId = args.deviceId; getDeviceRuntime(runtime, args.deviceId); await publish(args.panelId, runtime); return snapshotFor(runtime); }),
-    host.registerHandler("run.start", { args: runArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.binding.flutterProjectPath) throw new Error("Select a Flutter project first"); if (!runtime.devices.some((device) => device.id === args.deviceId)) throw new Error("Selected Flutter device is no longer available"); if (!runtime.executable) throw new Error("Flutter SDK unavailable"); const deviceRuntime = getDeviceRuntime(runtime, args.deviceId); await deviceRuntime.run?.stop(); deviceRuntime.console.clear(); deviceRuntime.pendingRecords = []; deviceRuntime.sequence = 0; const session = new FlutterRunSession({ executable: runtime.executable.executable, projectPath: runtime.binding.flutterProjectPath, deviceId: args.deviceId, mode: args.mode, entrypoint: args.entrypoint, extraArgs: args.extraArgs }); deviceRuntime.run = session; session.on("output", (stream: ConsoleRecord["stream"], text: string) => append(args.panelId, runtime, args.deviceId, stream, text)); session.on("state", () => { if (!runtime.connected) scheduleDisconnect(args.panelId, runtime); void publish(args.panelId, runtime).catch(() => {}); }); session.start(); await publish(args.panelId, runtime); return { ok: true, message: `Starting on ${args.deviceId}` }; }),
+    host.registerHandler("run.start", { args: runArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await startDeviceRun(args.panelId, runtime, args.deviceId, { mode: args.mode, entrypoint: args.entrypoint, extraArgs: args.extraArgs }); return { ok: true, message: `Starting on ${args.deviceId}` }; }),
+    host.registerHandler("run.reinstall", { args: devicePanelArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const deviceRuntime = getDeviceRuntime(runtime, args.deviceId); const config = deviceRuntime.launchConfig ?? { mode: "debug" as const, extraArgs: [] }; await startDeviceRun(args.panelId, runtime, args.deviceId, config, true); return { ok: true, message: `Reinstalling and restarting on ${args.deviceId}` }; }),
     host.registerHandler("run.control", { args: controlArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const session = runtime.sessions.get(args.deviceId)?.run; if (!session) throw new Error("No Flutter run session exists for the selected device"); if (args.operation === "stop") await session.stop(); else if (args.operation === "detach") await session.detach(); else await session.reload(args.operation === "hotRestart"); await publish(args.panelId, runtime); return { ok: true, message: args.operation === "hotReload" ? "Hot reload complete" : args.operation === "hotRestart" ? "Hot restart complete" : args.operation === "detach" ? "Debugger detached; application left running" : "Application stopped" }; }),
-    host.registerHandler("screenshot.capture", { args: screenshotArgsSchema, result: screenshotResultSchema, requires: ["shell:exec", "fs:user-data-write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.daemon) throw new Error("Flutter daemon unavailable"); const device = runtime.devices.find((item) => item.id === args.deviceId); if (!device?.capabilities.screenshot) throw new Error(`${device?.name ?? args.deviceId} does not advertise screenshot support`); const bytes = await runtime.daemon.takeScreenshot(args.deviceId); const directory = screenshotDirectory(host.pluginId); await mkdir(directory, { recursive: true }); const filePath = path.join(directory, `${new Date().toISOString().replaceAll(":", "-")}-${args.deviceId.replace(/[^a-zA-Z0-9._-]/g, "_")}.png`); await writeFile(filePath, bytes); return { ok: true, message: "Screenshot captured", deviceId: args.deviceId, filePath, dataUrl: `data:image/png;base64,${bytes.toString("base64")}`, copied: false }; }),
+    host.registerHandler("screenshot.capture", { args: screenshotArgsSchema, result: screenshotResultSchema, requires: ["shell:exec", "fs:user-data-write", "clipboard:write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.daemon) throw new Error("Flutter daemon unavailable"); const device = runtime.devices.find((item) => item.id === args.deviceId); if (!device?.capabilities.screenshot) throw new Error(`${device?.name ?? args.deviceId} does not advertise screenshot support`); const bytes = await runtime.daemon.takeScreenshot(args.deviceId); const directory = screenshotDirectory(host.pluginId); await mkdir(directory, { recursive: true }); const filePath = path.join(directory, `${new Date().toISOString().replaceAll(":", "-")}-${args.deviceId.replace(/[^a-zA-Z0-9._-]/g, "_")}.png`); await writeFile(filePath, bytes); if (args.copyToClipboard) await host.clipboard.writeImage(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)); return { ok: true, message: args.copyToClipboard ? "Screenshot captured and copied" : "Screenshot captured", deviceId: args.deviceId, filePath, dataUrl: `data:image/png;base64,${bytes.toString("base64")}`, copied: args.copyToClipboard }; }),
     host.registerHandler("devtools.open", { args: devicePanelArgsSchema, result: operationResultSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const run = runtime.sessions.get(args.deviceId)?.run?.getSnapshot(); const url = run?.devToolsUri ?? (run?.vmServiceUri ? `https://devtools.flutter.dev/?uri=${encodeURIComponent(run.vmServiceUri)}` : null); if (!url) throw new Error("DevTools becomes available after the selected device's VM service connects"); const result = await host.dispatch("browser.openUrl", { url }); if (!result.ok) throw new Error(result.error.message); return { ok: true, message: "DevTools opened" }; }),
-    host.registerHandler("screenshot.open", { args: z.object({ filePath: z.string().min(1) }), result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { if (!isOwnedScreenshotPath(host.pluginId, args.filePath)) throw new Error("Only screenshots created by Flutter Tools can be opened"); const filePath = path.resolve(args.filePath); await launchSystemCommand(screenshotOpenCommand(process.platform, filePath)); return { ok: true, message: "Screenshot opened" }; }),
+    host.registerHandler("screenshot.copy", { args: z.object({ filePath: z.string().min(1) }), result: operationResultSchema, requires: ["fs:user-data-write", "clipboard:write"] }, async (_ctx, args) => { if (!isOwnedScreenshotPath(host.pluginId, args.filePath)) throw new Error("Only screenshots created by Flutter Tools can be copied"); const bytes = await readFile(path.resolve(args.filePath)); await host.clipboard.writeImage(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)); return { ok: true, message: "Screenshot copied" }; }),
+    host.registerHandler("screenshot.open", { args: z.object({ filePath: z.string().min(1) }), result: operationResultSchema, requires: ["fs:user-data-write"] }, async (_ctx, args) => { if (!isOwnedScreenshotPath(host.pluginId, args.filePath)) throw new Error("Only screenshots created by Flutter Tools can be opened"); await host.system.openPath(path.resolve(args.filePath)); return { ok: true, message: "Screenshot opened" }; }),
     host.registerHandler("screenshot.delete", { args: z.object({ filePath: z.string().min(1) }), result: operationResultSchema, requires: ["fs:user-data-write"] }, async (_ctx, args) => { if (!isOwnedScreenshotPath(host.pluginId, args.filePath)) throw new Error("Only screenshots created by Flutter Tools can be deleted"); try { await unlink(path.resolve(args.filePath)); } catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; } return { ok: true, message: "Screenshot deleted" }; }),
     host.registerHandler("console.clear", { args: devicePanelArgsSchema, result: operationResultSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const session = getDeviceRuntime(runtime, args.deviceId); session.console.clear(); session.pendingRecords = []; session.sequence = 0; await publish(args.panelId, runtime); return { ok: true, message: "Console cleared" }; }),
     host.registerHandler("console.copy", { args: z.object({ text: z.string().max(8 * 1024 * 1024) }), result: operationResultSchema, requires: ["clipboard:write"] }, async (_ctx, args) => { await host.clipboard.writeText(args.text); return { ok: true, message: "Console copied" }; }),
-    host.registerHandler("workspace.disconnect", { args: z.object({ panelId: z.string().min(1) }), result: operationResultSchema }, async (_ctx, args) => { const runtime = runtimes.get(args.panelId); if (!runtime) return { ok: false, message: "Panel was already disconnected" }; for (const [deviceId, session] of runtime.sessions) flush(args.panelId, deviceId, session); scheduleDisconnect(args.panelId, runtime); return { ok: true, message: "Panel hidden; Flutter sessions retained for reconnect" }; }),
   ]);
 
   return async () => {

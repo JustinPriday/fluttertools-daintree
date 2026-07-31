@@ -17,7 +17,7 @@ describe("per-device Flutter workspace contracts", () => {
   it("carries selected context and independent session summaries", () => {
     const parsed = snapshotSchema.parse({
       binding: { schemaVersion: 1, worktreeId: "wt", worktreeName: "mobile", worktreePath: "/mobile", flutterProjectPath: "/mobile/app" },
-      projects: [{ path: "/mobile/app", name: "app", relativePath: "app" }], devices: [], selectedDeviceId: "pixel", sdk: null,
+      projects: [{ path: "/mobile/app", name: "app", relativePath: "app" }], devices: [], selectedDeviceId: "pixel", sdk: null, toolError: null,
       run: idleRun, sessions: [{ deviceId: "iphone", state: "running", appId: "app-1", startedAt: "2026-07-22T00:00:00.000Z" }], console: [], sequence: 0,
     });
     expect(parsed.selectedDeviceId).toBe("pixel");

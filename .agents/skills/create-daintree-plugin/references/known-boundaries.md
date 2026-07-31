@@ -2,19 +2,11 @@
 
 These findings were established while building a production panel plugin. Revalidate them against the target Daintree release before relying on them or reporting them.
 
-## Current Daintree 0.28 boundaries
+## Current Daintree 0.29 boundaries
 
 ### Native panel header actions
 
 Plugins can set a native badge. They cannot declare arbitrary dynamic native header controls based on selected resource state. Put feature controls in the view body unless Daintree adds a public contribution point.
-
-### Dock / launch-panel participation
-
-Non-PTY third-party panels cannot currently declare terminal-style Dock participation or the same Move to Dock action available to eligible built-in panels. Do not import private panel registries to fake it.
-
-### Per-panel worker lifecycle
-
-The view receives `disposeSignal`, but the worker contract remains plugin-lifetime oriented and does not provide an authoritative permanent-panel-deleted callback. Use explicit disconnect, idempotent replacement, leases if justified, and final plugin cleanup.
 
 ### Push backpressure
 
@@ -22,7 +14,7 @@ The view receives `disposeSignal`, but the worker contract remains plugin-lifeti
 
 ### Managed process interaction
 
-Confirm the target release's exact process output API. Managed processes are excellent for supervised non-shell tasks, but interactive workflows may still need stdin, PTY, resize, or worker-readable structured output that the current surface does not expose.
+Managed pipe processes expose separate worker-readable stdout/stderr but keep stdin closed. Managed PTY processes expose writable input and resize but merge output streams and may change child terminal behaviour. Protocol clients that need bidirectional structured pipes must prove PTY compatibility or retain a narrowly documented direct-process adapter.
 
 Do not state the current concurrency cap as a permanent API promise.
 
@@ -48,6 +40,11 @@ Production Chromium ESM records are URL-cached. Use a versioned view filename. A
 - `useHostChannel` sends every call; a superseded call finishes transport work but resolves to `undefined`, while its stale error/state updates are ignored.
 - Daintree 0.28 routes plugin panels through standard pane chrome and click-to-focus behavior.
 - Icon validation already reports unrecognized IDs.
+- Daintree 0.29 makes every panel kind dockable by default.
+- `host.onDidChangePanelLifecycle` distinguishes temporary hiding from terminal panel removal.
+- `host.clipboard.writeImage` provides bounded, audited PNG clipboard writes.
+- `host.system.openPath` and `showItemInFolder` include the caller's private plugin-data namespace.
+- Manifest commands and runtime actions accept per-action `requires` capability intent.
 
 ## Historical compatibility findings
 

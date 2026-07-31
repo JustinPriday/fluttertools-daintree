@@ -1,14 +1,28 @@
 {
   "name": "justinpriday.flutter-tools",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "displayName": "Flutter Tools",
   "description": "Worktree-bound Flutter devices, run controls, console, DevTools, and screenshots.",
   "tagline": "A focused Flutter cockpit inside every Daintree worktree.",
   "category": "workspace",
   "main": "dist/index.js",
-  "engines": { "daintree": ">=0.28.0" },
-  "capabilities": ["shell:exec", "fs:project-read", "fs:user-data-write", "clipboard:write"],
-  "scopes": { "fs": { "allowedPaths": ["${project}", "${worktree}"] } },
+  "engines": {
+    "daintree": ">=0.29.0"
+  },
+  "capabilities": [
+    "shell:exec",
+    "fs:project-read",
+    "fs:user-data-write",
+    "clipboard:write"
+  ],
+  "scopes": {
+    "fs": {
+      "allowedPaths": [
+        "${project}",
+        "${worktree}"
+      ]
+    }
+  },
   "contributes": {
     "panels": [
       {
@@ -22,9 +36,8 @@
     "views": [
       {
         "id": "workspace",
-        "componentPath": "dist/panel-0.2.1.js",
-        "location": "panel",
-        "iconId": "monitor-play"
+        "componentPath": "dist/panel-0.3.0.js",
+        "location": "panel"
       }
     ],
     "commands": [
@@ -35,7 +48,14 @@
         "category": "Flutter",
         "kind": "command",
         "danger": "safe",
-        "keywords": ["flutter", "dart", "device", "run", "console"]
+        "requires": [],
+        "keywords": [
+          "flutter",
+          "dart",
+          "device",
+          "run",
+          "console"
+        ]
       },
       {
         "id": "open-another",
@@ -44,7 +64,12 @@
         "category": "Flutter",
         "kind": "command",
         "danger": "safe",
-        "keywords": ["flutter", "multi-root", "device"]
+        "requires": [],
+        "keywords": [
+          "flutter",
+          "multi-root",
+          "device"
+        ]
       }
     ],
     "toolbarButtons": [

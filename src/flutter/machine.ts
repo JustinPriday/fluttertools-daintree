@@ -21,7 +21,7 @@ export class FlutterMachineProcess extends EventEmitter {
 
   start(): void {
     if (this.running) return;
-    const child = spawn(this.options.executable, this.options.args, { cwd: this.options.cwd, env: process.env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(this.options.executable, this.options.args, { cwd: this.options.cwd, env: process.env, detached: process.platform !== "win32", shell: false, stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     this.stdoutBuffer = "";
     let settled = false;
@@ -90,16 +90,25 @@ export class FlutterMachineProcess extends EventEmitter {
       return;
     }
 
-    child.kill("SIGTERM");
+    this.signalProcessTree(child, "SIGTERM");
     const exitedGracefully = await this.waitForExit(
       childExit,
       this.options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS,
     );
     if (exitedGracefully) return;
 
-    child.kill("SIGKILL");
+    this.signalProcessTree(child, "SIGKILL");
     if (!(await this.waitForExit(childExit, FORCE_KILL_WAIT_MS))) {
       throw new Error("Flutter process did not exit after SIGKILL");
+    }
+  }
+
+  private signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+    try {
+      if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+      else child.kill(signal);
+    } catch {
+      child.kill(signal);
     }
   }
 

@@ -45,6 +45,7 @@ export const snapshotSchema = z.object({
   devices: z.array(deviceSchema),
   selectedDeviceId: z.string().nullable(),
   sdk: z.object({ executable: z.string(), source: z.enum(["setting", "fvm", "path"]), version: z.string().nullable() }).nullable(),
+  toolError: z.string().nullable(),
   run: runSnapshotSchema,
   sessions: z.array(deviceSessionSchema),
   console: z.array(consoleRecordSchema),

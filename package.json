@@ -1,6 +1,6 @@
 {
   "name": "justinpriday.flutter-tools",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Worktree-bound Flutter devices, run controls, console, DevTools, and screenshots for Daintree.",
   "type": "module",
   "private": true,

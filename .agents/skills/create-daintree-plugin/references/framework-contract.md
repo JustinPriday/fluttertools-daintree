@@ -40,9 +40,10 @@ A panel and its view use the same bare ID. Daintree supplies the standard pane h
 - `panelId`: runtime panel-instance identity;
 - `pluginId`: manifest identity;
 - `initialArgs`: save/restore-surviving binding arguments; and
-- `disposeSignal`: renderer teardown notification.
+- `disposeSignal`: renderer teardown notification; and
+- `panelRemovedSignal`: terminal panel-record removal notification.
 
-Use `setPanelBadge()` for supported native title status. Do not depend on arbitrary native header controls.
+Use `host.onDidChangePanelLifecycle()` in the worker to release durable resources on `removed`; temporary view unmounts and trashed-but-restorable panels are not terminal. Use `setPanelBadge()` for supported native title status. Do not depend on arbitrary native header controls.
 
 ## Authority
 
@@ -74,7 +75,8 @@ Capabilities are not a general Node sandbox. Host-mediated filesystem, Git, clip
 - quick pick, input, confirmation, and toast helpers
 - managed processes
 - scoped filesystem and Git
-- clipboard
+- text and bounded PNG clipboard writes
+- scoped system open/reveal for project, worktree, and private plugin-data files
 - plugin logger
 - MCP, agents, forge, and file decorations when the product matches them
 
