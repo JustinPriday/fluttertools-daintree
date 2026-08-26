@@ -14,7 +14,13 @@ const localChrome = process.platform === "darwin"
 const hasLocalChrome = localChrome
   ? await access(localChrome).then(() => true, () => false)
   : false;
-const browser = await chromium.launch({ headless: true, executablePath: hasLocalChrome ? localChrome : undefined });
+let browser;
+try {
+  browser = await chromium.launch({ headless: true, executablePath: hasLocalChrome ? localChrome : undefined, args: ["--no-sandbox", "--disable-crash-reporter"] });
+} catch (error) {
+  if (!hasLocalChrome) throw error;
+  browser = await chromium.launch({ headless: true });
+}
 try {
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   await page.setContent(`<!doctype html><style>${styles}</style>
@@ -49,7 +55,30 @@ try {
   if (normal.consoleHeight < 420 || short.consoleHeight < 110) {
     throw new Error(`Console viewport did not expand: ${JSON.stringify({ normal, short })}`);
   }
-  console.log(JSON.stringify({ normal, short }, null, 2));
+  await page.locator(".ft-tabs").evaluate((node) => { node.innerHTML = '<button class="ft-tab active">Media</button>'; });
+  await page.locator(".ft-pane").evaluate((node) => {
+    node.className = "ft-pane ft-media";
+    node.innerHTML = Array.from({ length: 3 }, (_, index) => `<article class="ft-media-card recording"><div class="ft-media-placeholder"><strong>MP4 RECORDING</strong><span>0:0${index}</span></div><div class="ft-media-info"><div><strong>Screen recording</strong><span>12:00:0${index}</span></div><div class="ft-media-actions"><button class="ft-btn">Open</button></div></div></article>`).join("");
+  });
+  async function measureMedia(width, height) {
+    await page.locator("#frame").evaluate((node, size) => { node.style.width = `${size.width}px`; node.style.height = `${size.height}px`; }, { width, height });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    return page.evaluate(() => {
+      const pane = document.querySelector(".ft-media");
+      const card = document.querySelector(".ft-media-card").getBoundingClientRect();
+      const actions = document.querySelector(".ft-media-actions").getBoundingClientRect();
+      const paneRect = pane.getBoundingClientRect();
+      return { paneHeight: paneRect.height, paneWidth: paneRect.width, cardWidth: card.width, cardHeight: card.height, horizontalOverflow: pane.scrollWidth > pane.clientWidth + 1, cardClipped: card.right > paneRect.right + 1, actionsClipped: actions.bottom > paneRect.bottom + 1 };
+    });
+  }
+  const mediaNormal = await measureMedia(900, 640);
+  const mediaNarrow = await measureMedia(380, 640);
+  const mediaConstrained = await measureMedia(700, 390);
+  const mediaShort = await measureMedia(700, 240);
+  if (mediaNormal.paneHeight < 450 || mediaNarrow.cardWidth < 200 || mediaNarrow.horizontalOverflow || mediaNarrow.cardClipped || mediaConstrained.actionsClipped || mediaShort.paneHeight < 110 || mediaShort.cardHeight > mediaShort.paneHeight || mediaShort.actionsClipped) {
+    throw new Error(`Media layout did not remain usable: ${JSON.stringify({ mediaNormal, mediaNarrow, mediaConstrained, mediaShort })}`);
+  }
+  console.log(JSON.stringify({ normal, short, mediaNormal, mediaNarrow, mediaConstrained, mediaShort }, null, 2));
 } finally {
   await browser.close();
 }

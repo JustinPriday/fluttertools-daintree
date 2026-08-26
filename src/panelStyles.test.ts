@@ -19,10 +19,20 @@ describe("Flutter Tools panel layout policy", () => {
     expect(panelStyles).toContain(".ft-repo-bar,.ft-console-tools{display:none}");
   });
 
-  it("uses full-width content and an overlay screenshot delete control", () => {
+  it("uses a responsive media grid and an overlay media delete control", () => {
     expect(panelStyles).not.toContain("grid-template-columns:minmax(185px");
-    expect(panelStyles).toContain(".ft-shot{position:relative");
+    expect(panelStyles).toContain(".ft-media{overflow:auto");
+    expect(panelStyles).toContain("grid-template-columns:repeat(auto-fill,minmax(220px,1fr))");
     expect(panelStyles).toContain(".ft-shot-delete{position:absolute;top:7px;right:7px");
+    expect(panelStyles).toContain(".ft-media-actions{position:absolute;z-index:2;top:7px;left:7px");
+    expect(panelStyles).toContain("@container flutter-tools (max-width:420px)");
+    expect(panelStyles).toContain(".ft-media{grid-template-columns:minmax(0,1fr);padding:8px}");
+  });
+
+  it("keeps the idle recorder compact while preserving active status text", () => {
+    expect(panelStyles).toContain(".ft-record-btn{width:29px;min-width:29px");
+    expect(panelStyles).toContain(".ft-record-btn.active{width:auto;min-width:72px");
+    expect(panelStyles).not.toContain(".ft-record-btn span{display:none}");
   });
 
   it("wraps long recovery diagnostics instead of truncating them", () => {

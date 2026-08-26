@@ -1,8 +1,8 @@
 {
   "name": "justinpriday.flutter-tools",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "displayName": "Flutter Tools",
-  "description": "Worktree-bound Flutter devices, run controls, console, DevTools, and screenshots.",
+  "description": "Worktree-bound Flutter devices, run controls, console, DevTools, screenshots, and Android recordings.",
   "tagline": "A focused Flutter cockpit inside every Daintree worktree.",
   "category": "workspace",
   "main": "dist/index.js",
@@ -36,7 +36,7 @@
     "views": [
       {
         "id": "workspace",
-        "componentPath": "dist/panel-0.3.0.js",
+        "componentPath": "dist/panel-0.4.0.js",
         "location": "panel"
       }
     ],
@@ -100,6 +100,15 @@
         "default": 5,
         "min": 1,
         "max": 12
+      },
+      {
+        "id": "captureExportDirectory",
+        "type": "directory",
+        "scope": "user",
+        "label": "Capture save folder",
+        "description": "Optional folder where new screenshots and screen recordings are saved. When empty, Flutter Tools uses its private storage.",
+        "default": "",
+        "mustExist": true
       }
     ]
   }

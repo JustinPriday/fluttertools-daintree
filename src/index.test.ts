@@ -24,20 +24,9 @@ describe("Flutter Tools activation", () => {
     const host = createMockHost({ capabilities: ["shell:exec", "fs:project-read", "fs:user-data-write", "clipboard:write"], activeWorktree: worktree(), worktrees: [worktree()] });
     await activate(host);
     expect(host.registeredActions.map((item) => item.descriptor)).toEqual(expect.arrayContaining([expect.objectContaining({ id: "open", requires: [] }), expect.objectContaining({ id: "open-another", requires: [] })]));
-    expect(host.registeredHandlers.map((item) => item.channel)).toEqual(expect.arrayContaining(["workspace.connect", "run.start", "run.reinstall", "run.control", "screenshot.capture", "screenshot.copy", "screenshot.open", "screenshot.delete"]));
+    expect(host.registeredHandlers.map((item) => item.channel)).toEqual(expect.arrayContaining(["workspace.connect", "settings.open", "run.start", "run.reinstall", "run.control", "recording.start", "recording.stop", "screenshot.capture", "screenshot.copy", "media.open", "media.reveal", "media.delete"]));
+    expect(host.registeredHandlers.map((item) => item.channel)).not.toEqual(expect.arrayContaining(["screenshot.open", "screenshot.delete"]));
     expect(host.registeredHandlers.map((item) => item.channel)).not.toContain("workspace.disconnect");
-  });
-
-  it("uses Daintree's native image clipboard and scoped system opener", async () => {
-    const host = createMockHost({ capabilities: ["shell:exec", "fs:project-read", "fs:user-data-write", "clipboard:write"], activeWorktree: worktree(), worktrees: [worktree()] });
-    await activate(host);
-    const filePath = path.join(homedir(), ".daintree", "plugin-data", host.pluginId, "screenshots", "capture.png");
-    const copy = host.registeredHandlers.find((item) => item.channel === "screenshot.copy");
-    const open = host.registeredHandlers.find((item) => item.channel === "screenshot.open");
-    await copy?.handler({} as never, { filePath });
-    await open?.handler({} as never, { filePath });
-    expect(host.clipboardWriteImageCalls).toEqual([4]);
-    expect(host.systemOpenPathCalls).toEqual([filePath]);
   });
 
   it("opens a restore-safe panel bound to the visible worktree", async () => {

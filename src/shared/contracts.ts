@@ -39,6 +39,27 @@ export type RunState = z.infer<typeof runStateSchema>;
 export const runSnapshotSchema = z.object({ state: runStateSchema, appId: z.string().nullable(), deviceId: z.string().nullable(), vmServiceUri: z.string().nullable(), devToolsUri: z.string().nullable(), startedAt: z.string().nullable(), error: z.string().nullable() });
 export const deviceSessionSchema = z.object({ deviceId: z.string().min(1), state: runStateSchema, appId: z.string().nullable(), startedAt: z.string().nullable() });
 
+export const recordingStateSchema = z.enum(["idle", "starting", "recording", "stopping", "finalizing", "failed"]);
+export const recordingSnapshotSchema = z.object({
+  state: recordingStateSchema,
+  deviceId: z.string().nullable(),
+  startedAt: z.string().nullable(),
+  error: z.string().nullable(),
+  ownedByPanel: z.boolean(),
+});
+export type RecordingSnapshot = z.infer<typeof recordingSnapshotSchema>;
+
+export const mediaItemSchema = z.object({
+  id: z.string().min(1),
+  deviceId: z.string().min(1),
+  kind: z.enum(["screenshot", "recording"]),
+  filePath: z.string().min(1),
+  saveWarning: z.string().nullable(),
+  createdAt: z.string(),
+  durationSeconds: z.number().nonnegative().nullable(),
+});
+export type MediaItem = z.infer<typeof mediaItemSchema>;
+
 export const snapshotSchema = z.object({
   binding: flutterPanelBindingSchema,
   projects: z.array(projectSchema),
@@ -47,6 +68,8 @@ export const snapshotSchema = z.object({
   sdk: z.object({ executable: z.string(), source: z.enum(["setting", "fvm", "path"]), version: z.string().nullable() }).nullable(),
   toolError: z.string().nullable(),
   run: runSnapshotSchema,
+  recording: recordingSnapshotSchema.default({ state: "idle", deviceId: null, startedAt: null, error: null, ownedByPanel: true }),
+  media: z.array(mediaItemSchema).default([]),
   sessions: z.array(deviceSessionSchema),
   console: z.array(consoleRecordSchema),
   sequence: z.number().int().nonnegative(),
@@ -62,6 +85,16 @@ export const controlArgsSchema = devicePanelArgsSchema.extend({ operation: z.enu
 export const screenshotArgsSchema = devicePanelArgsSchema.extend({ copyToClipboard: z.boolean().default(false) });
 
 export const operationResultSchema = z.object({ ok: z.boolean(), message: z.string() });
-export const screenshotResultSchema = z.object({ ok: z.boolean(), message: z.string(), deviceId: z.string(), filePath: z.string().nullable(), dataUrl: z.string().nullable(), copied: z.boolean() });
+export const screenshotResultSchema = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  deviceId: z.string(),
+  filePath: z.string().nullable(),
+  dataUrl: z.string().nullable(),
+  copied: z.boolean(),
+  saveWarning: z.string().nullable(),
+});
+export const panelMediaFileArgsSchema = devicePanelArgsSchema.extend({ filePath: z.string().min(1) });
+export const deleteMediaArgsSchema = panelMediaFileArgsSchema.extend({ deleteFile: z.boolean().default(false) });
 export const consoleBatchSchema = z.object({ deviceId: z.string().min(1), sequence: z.number().int().nonnegative(), records: z.array(consoleRecordSchema) });
 export type ConsoleBatch = z.infer<typeof consoleBatchSchema>;

@@ -2,7 +2,7 @@
 
 Worktree-aware Flutter development tools inside [Daintree](https://github.com/daintreehq/daintree).
 
-Flutter Tools gives each Daintree worktree a persistent Flutter cockpit. Discover nested apps and connected devices, run and control several device sessions, inspect live output, open DevTools, and capture screenshots without switching to another IDE.
+Flutter Tools gives each Daintree worktree a persistent Flutter cockpit. Discover nested apps and connected devices, run and control several device sessions, inspect live output, open DevTools, and capture screenshots or Android screen recordings without switching to another IDE.
 
 > **Made in Daintree.** Flutter Tools was authored entirely inside Daintree—a plugin built from within the environment it extends.
 
@@ -29,7 +29,10 @@ This is especially useful when several worktrees run different revisions of an a
 - Run, Stop, Detach, Hot Reload, Hot Restart, and confirmed Reinstall & Restart controls.
 - Structured per-device console with bounded history, filtering, copy, clear, and follow-tail controls.
 - Session-specific Flutter DevTools launch inside Daintree's browser.
+- Unified Media view for screenshots and Android screen recordings.
 - Device screenshot capture, preview, deletion, scoped system opening, and native image copying.
+- Physical Android screen recording with elapsed state, automatic three-minute completion, and safe finalization across panel/device lifecycle changes.
+- Optional save folder for new PNG and MP4 captures, with private Flutter Tools storage as the fallback.
 - Persistent worktree and Flutter-project binding across panel restoration.
 - Native Daintree panel focus, drag, reorder, maximise, close, and status badges.
 
@@ -40,6 +43,7 @@ This is especially useful when several worktrees run different revisions of an a
 | Daintree | 0.29.0 or newer |
 | Node.js for development | 22.13.0 or newer from the Node 22 release line |
 | Flutter | A locally installed SDK available through settings, `.fvm/flutter_sdk`, or `PATH` |
+| Android recording | Android SDK Platform Tools (`adb`) available through `ANDROID_SDK_ROOT`, `ANDROID_HOME`, a standard SDK location, or `PATH` |
 | Flutter project | A `pubspec.yaml` with a Flutter SDK dependency inside the bound worktree |
 | Host OS | macOS first; other Flutter desktop hosts are not yet acceptance-tested |
 
@@ -67,7 +71,9 @@ Opening Flutter Tools binds the panel to the visible worktree. The plugin search
 - Long-press **Hot Restart** to confirm **Reinstall & Restart**, which permanently removes all app data stored on the Android or iOS device before launching the same run configuration.
 - Filter, copy, or clear the selected device's console. Scroll upward to pause follow-tail, then choose **Resume live tail** to return to current output.
 - Open the connected session in Flutter DevTools after its VM service becomes available.
-- Capture a screenshot when the selected device supports it, then preview, open, copy, or delete the saved PNG.
+- Capture a screenshot when the selected device supports it, then preview, open, reveal, copy, or remove the saved PNG.
+- On a selected Android target, choose **Record** and then **Stop** to save an MP4. The control shows elapsed time while recording.
+- In Daintree plugin settings, optionally set **Capture save folder** to Desktop, Downloads, or another existing directory. Each new PNG or MP4 is saved once, directly there. When empty or unavailable, Flutter Tools uses its private storage instead.
 - Choose **Detach** to leave the app running while ending the Flutter tool connection.
 
 Run, Stop, Detach, Hot Reload, Hot Restart, and Reinstall & Restart act on real local Flutter processes. Reinstall & Restart requires confirmation because it removes the selected device's installed app and local data.
@@ -76,16 +82,16 @@ Run, Stop, Detach, Hot Reload, Hot Restart, and Reinstall & Restart act on real 
 
 The manifest declares:
 
-- `shell:exec` for Flutter daemon and run processes.
+- `shell:exec` for Flutter, ADB, and Android `screenrecord` processes.
 - `fs:project-read` to discover Flutter projects within the current project or worktree.
-- `fs:user-data-write` to save and delete captured screenshots.
+- `fs:user-data-write` to save, open, reveal, and delete screenshots and recordings.
 - `clipboard:write` to copy console text and screenshot PNGs.
 
 Flutter's machine protocols require bidirectional standard input and structured output. Daintree 0.29 exposes worker-readable output only for piped processes, whose stdin is closed, while writable stdin requires PTY mode and merges the streams. Until Flutter machine-mode compatibility with that PTY transport is proven, the plugin worker starts fixed Flutter commands directly with argument arrays and `shell: false`.
 
-Screenshot copying uses Daintree's bounded, host-mediated image clipboard API. Opening a saved PNG uses Daintree's plugin-scoped system API, confined to Flutter Tools' own user-data directory.
+Screenshot copying uses Daintree's bounded, host-mediated image clipboard API. Opening or revealing private media uses Daintree's plugin-scoped system API. A custom save directory is an explicit user-selected setting; the trusted plugin worker writes one collision-safe file there and uses a fixed, shell-free macOS opener for that exact recorded path.
 
-Flutter Tools does not include telemetry or a remote service. Flutter command output and screenshots remain local to the Daintree plugin process and its user-data directory.
+Flutter Tools does not include telemetry or a remote service. Flutter command output and captured media remain local to the Daintree plugin process, its user-data directory, and any save folder you explicitly configure.
 
 ## Architecture
 
@@ -99,8 +105,8 @@ Flutter daemon and Flutter run processes
 Local devices, emulators, simulators, desktop, and web targets
 ```
 
-- The React bundle owns presentation, selected-device views, bounded rendered output, filtering, screenshots, and user interaction.
-- The Node worker owns worktree bindings, project discovery, SDK resolution, Flutter processes, per-device sessions, and persisted screenshot files.
+- The React bundle owns presentation, selected-device views, bounded rendered output, filtering, PNG previews, recording controls, and user interaction.
+- The Node worker owns worktree bindings, project discovery, SDK/ADB resolution, Flutter and recording processes, per-device sessions, and managed media files.
 - Zod schemas validate renderer-to-worker requests, worker responses, and pushed console batches.
 - Each panel has independent runtime state; each device has an independent run session and console buffer.
 
@@ -197,7 +203,13 @@ tools/                       Deterministic build, packaging, and release helpers
 - Emulator and simulator creation or launch is not included; start them with existing platform or Flutter tools.
 - Attaching to an app started outside Flutter Tools is not included.
 - Screenshot availability remains device-dependent.
-- Screenshots are kept in the current panel view only until it unmounts, though their PNG files remain in plugin user data until deleted.
+- Screen recording is Android-only. iOS, macOS, web, and other Flutter targets continue to support their existing non-recording controls.
+- Android recordings have a hard three-minute limit, contain no audio, and use the device's current orientation. Some devices may impose additional `screenrecord` restrictions.
+- Android Wear and unusual display configurations are not yet acceptance-tested.
+- Media metadata belongs to the current plugin runtime. Files saved in private Flutter Tools storage remain there until explicitly deleted; files saved to a configured folder exist only in that folder.
+- Removing media asks whether to keep the file and remove only its Media reference, or permanently delete the file as well.
+- If a configured save folder is unavailable, Flutter Tools saves the capture in private storage and surfaces a warning.
+- MP4 clipboard copying is intentionally unavailable; recordings provide **Open** and **Reveal** actions instead.
 
 ## Project identity
 

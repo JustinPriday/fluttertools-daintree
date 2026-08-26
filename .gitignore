@@ -26,6 +26,7 @@
 
 # Local AI-generated documentation
 /ai_docs/
+/mcp.config.json
 
 # Environment and secrets
 .env

@@ -1,6 +1,7 @@
 import path from "node:path";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { spawn } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import type { PluginHostApi, PluginPanelBadge, PluginQuickPickItem, PluginWorktreeSnapshot } from "@daintreehq/plugin-sdk";
 import { z } from "zod";
 import { FlutterDaemon } from "./flutter/daemon.js";
@@ -10,10 +11,13 @@ import { FlutterRunSession } from "./flutter/runSession.js";
 import { uninstallFlutterApp } from "./flutter/uninstall.js";
 import { ConsoleBuffer } from "./shared/consoleBuffer.js";
 import {
-  consoleBatchSchema, controlArgsSchema, devicePanelArgsSchema, flutterPanelBindingSchema, operationResultSchema, panelArgsSchema,
-  runArgsSchema, screenshotArgsSchema, screenshotResultSchema, selectDeviceArgsSchema, setProjectArgsSchema,
+  consoleBatchSchema, controlArgsSchema, deleteMediaArgsSchema, devicePanelArgsSchema, flutterPanelBindingSchema, operationResultSchema, panelArgsSchema,
+  panelMediaFileArgsSchema, runArgsSchema, screenshotArgsSchema, screenshotResultSchema, selectDeviceArgsSchema, setProjectArgsSchema,
   snapshotSchema, type ConsoleRecord, type FlutterPanelBinding, type FlutterProject, type FlutterWorkspaceSnapshot,
 } from "./shared/contracts.js";
+import { createRemoteRecordingPath, deleteMediaFile, isOwnedMediaPath, reserveManagedMediaDestination, resolveMediaDestination } from "./media/storage.js";
+import { AndroidScreenRecorder, cleanupAndroidRecordingFile, resolveAdbExecutable, supportsAndroidRecording } from "./flutter/androidRecording.js";
+import { RecordingCoordinator } from "./flutter/recordingCoordinator.js";
 
 const PANEL_KIND = "justinpriday.flutter-tools.workspace";
 const BINDINGS_KEY = "panel-bindings-v1";
@@ -38,17 +42,25 @@ interface DeviceRuntime {
   pendingRecords: ConsoleRecord[];
   batchTimer: ReturnType<typeof setTimeout> | null;
   sequence: number;
+  media: FlutterWorkspaceSnapshot["media"];
+  staleRemoteRecordingPath: string | null;
+  recordingSaveWarning: string | null;
 }
 
 type StoredBindings = Record<string, FlutterPanelBinding>;
 
 function emptyRun(): FlutterWorkspaceSnapshot["run"] { return { state: "idle", appId: null, deviceId: null, vmServiceUri: null, devToolsUri: null, startedAt: null, error: null }; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function screenshotDirectory(pluginId: string): string { return path.resolve(homedir(), ".daintree", "plugin-data", pluginId, "screenshots"); }
-
+async function openExternalSavedMedia(filePath: string, reveal: boolean): Promise<void> {
+  if (process.platform !== "darwin") throw new Error("Opening a custom capture save location is currently supported on macOS only");
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("/usr/bin/open", reveal ? ["-R", "--", filePath] : ["--", filePath], { shell: false, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`System opener exited (${signal ?? code ?? "unknown"})`)));
+  });
+}
 export function isOwnedScreenshotPath(pluginId: string, filePath: string): boolean {
-  const resolved = path.resolve(filePath);
-  return path.dirname(resolved) === screenshotDirectory(pluginId) && path.extname(resolved).toLowerCase() === ".png";
+  return isOwnedMediaPath(pluginId, filePath, "screenshot");
 }
 
 function isActiveState(state: FlutterWorkspaceSnapshot["run"]["state"]): boolean {
@@ -109,20 +121,28 @@ function badge(runtime: PanelRuntime): PluginPanelBadge {
 
 export async function activate(host: PluginHostApi): Promise<() => void> {
   const runtimes = new Map<string, PanelRuntime>();
+  let recordingCoordinator: RecordingCoordinator;
 
   const getDeviceRuntime = (runtime: PanelRuntime, deviceId: string): DeviceRuntime => {
     const existing = runtime.sessions.get(deviceId); if (existing) return existing;
-    const created: DeviceRuntime = { run: null, launchConfig: null, launchPromise: null, console: new ConsoleBuffer(), pendingRecords: [], batchTimer: null, sequence: 0 };
+    const created: DeviceRuntime = { run: null, launchConfig: null, launchPromise: null, console: new ConsoleBuffer(), pendingRecords: [], batchTimer: null, sequence: 0, media: [], staleRemoteRecordingPath: null, recordingSaveWarning: null };
     runtime.sessions.set(deviceId, created); return created;
   };
 
-  const snapshotFor = (runtime: PanelRuntime): FlutterWorkspaceSnapshot => {
+  const addMedia = (runtime: PanelRuntime, deviceId: string, item: FlutterWorkspaceSnapshot["media"][number]): void => {
+    const session = getDeviceRuntime(runtime, deviceId);
+    session.media = [item, ...session.media].slice(0, 30);
+  };
+
+  const snapshotFor = (panelId: string, runtime: PanelRuntime): FlutterWorkspaceSnapshot => {
     const selected = runtime.selectedDeviceId ? getDeviceRuntime(runtime, runtime.selectedDeviceId) : null;
     return snapshotSchema.parse({
       binding: runtime.binding, projects: runtime.projects, devices: runtime.devices,
       selectedDeviceId: runtime.selectedDeviceId, sdk: runtime.executable,
       toolError: runtime.toolError,
       run: selected?.run?.getSnapshot() ?? emptyRun(),
+      recording: recordingCoordinator.getSnapshot(panelId, runtime.selectedDeviceId),
+      media: selected?.media ?? [],
       sessions: [...runtime.sessions.entries()].map(([deviceId, session]) => { const run = session.run?.getSnapshot() ?? emptyRun(); return { deviceId, state: run.state, appId: run.appId, startedAt: run.startedAt }; }),
       console: selected?.console.snapshot() ?? [], sequence: selected?.sequence ?? 0,
     });
@@ -145,10 +165,40 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
 
   const publish = async (panelId: string, runtime: PanelRuntime): Promise<void> => {
     await Promise.all([
-      host.setPanelBadge(panelId, badge(runtime)),
-      host.postToPanel("workspace.snapshot", snapshotFor(runtime), panelId),
+      host.setPanelBadge(panelId, recordingCoordinator.getSnapshot(panelId, runtime.selectedDeviceId).state === "recording"
+        ? { kind: "label", text: "REC", color: "error", tooltip: "Recording Android screen" }
+        : badge(runtime)),
+      host.postToPanel("workspace.snapshot", snapshotFor(panelId, runtime), panelId),
     ]);
   };
+
+  const publishRecordingDevice = async (deviceId: string): Promise<void> => {
+    await Promise.all([...runtimes.entries()].filter(([, runtime]) => runtime.devices.some((device) => device.id === deviceId)).map(([panelId, runtime]) => publish(panelId, runtime)));
+  };
+
+  recordingCoordinator = new RecordingCoordinator({
+    onChange: (_panelId, deviceId) => publishRecordingDevice(deviceId),
+    onComplete: async (panelId, deviceId, result) => {
+      const runtime = runtimes.get(panelId);
+      if (!runtime) return;
+      const session = getDeviceRuntime(runtime, deviceId);
+      session.staleRemoteRecordingPath = result.cleanupWarning ? result.remotePath : null;
+      const completedAt = new Date();
+      const item: FlutterWorkspaceSnapshot["media"][number] = {
+        id: result.filePath,
+        deviceId,
+        kind: "recording",
+        filePath: result.filePath,
+        saveWarning: result.saveWarning ?? session.recordingSaveWarning ?? result.cleanupWarning,
+        createdAt: completedAt.toISOString(),
+        durationSeconds: result.durationSeconds,
+      };
+      addMedia(runtime, deviceId, item);
+      const warning = [result.cleanupWarning, result.saveWarning, session.recordingSaveWarning].filter(Boolean).join(" ");
+      session.recordingSaveWarning = null;
+      append(panelId, runtime, deviceId, warning ? "stderr" : "system", warning || `Screen recording saved to ${result.filePath}`);
+    },
+  });
 
   const startDeviceRun = async (
     panelId: string,
@@ -201,18 +251,20 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     try { await launch; } finally { if (deviceRuntime.launchPromise === launch) deviceRuntime.launchPromise = null; }
   };
 
-  const applyDevices = (runtime: PanelRuntime, devices: FlutterWorkspaceSnapshot["devices"]): void => {
+  const applyDevices = (panelId: string, runtime: PanelRuntime, devices: FlutterWorkspaceSnapshot["devices"]): void => {
+    const removedIds = runtime.devices.filter((existing) => !devices.some((device) => device.id === existing.id)).map((device) => device.id);
     runtime.devices = devices;
     if (!runtime.selectedDeviceId || !devices.some((item) => item.id === runtime.selectedDeviceId)) {
       runtime.selectedDeviceId = devices[0]?.id ?? null;
     }
+    for (const deviceId of removedIds) void recordingCoordinator.stop(panelId, deviceId).catch(() => {});
   };
 
   const attachDaemon = (panelId: string, runtime: PanelRuntime): FlutterDaemon => {
     const daemon = new FlutterDaemon(runtime.executable!.executable);
     runtime.daemon = daemon;
     daemon.on("devices", (devices: FlutterWorkspaceSnapshot["devices"]) => {
-      applyDevices(runtime, devices);
+      applyDevices(panelId, runtime, devices);
       void publish(panelId, runtime).catch(() => {});
     });
     daemon.on("log", (text: string) => {
@@ -242,7 +294,7 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     const fallbackAttempt = discoverFlutterDevices(runtime.executable.executable);
     const [daemonResult, fallbackResult] = await Promise.allSettled([daemonAttempt, fallbackAttempt]);
 
-    if (fallbackResult.status === "fulfilled") applyDevices(runtime, fallbackResult.value);
+    if (fallbackResult.status === "fulfilled") applyDevices(panelId, runtime, fallbackResult.value);
     if (daemonResult.status === "rejected") {
       await daemon.dispose().catch(() => {});
       if (runtime.daemon === daemon) runtime.daemon = null;
@@ -269,6 +321,7 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
   const disposeRuntime = async (panelId: string): Promise<boolean> => {
     const runtime = runtimes.get(panelId); if (!runtime) return false;
     runtimes.delete(panelId);
+    await recordingCoordinator.stopPanel(panelId).catch(() => {});
     for (const [deviceId, session] of runtime.sessions) flush(panelId, deviceId, session);
     await Promise.all([...runtime.sessions.values()].map((session) => session.run?.stop().catch(() => {})));
     await runtime.daemon?.dispose().catch(() => {});
@@ -306,23 +359,51 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     host.onDidChangePanelLifecycle((event) => { if (event.phase === "removed") void disposeRuntime(event.panelId); }),
     host.registerAction({ id: "open", title: "Flutter: Open Tools", description: "Open Flutter Tools bound to the visible worktree.", category: "Flutter", kind: "command", danger: "safe", requires: [] }, () => open(true)),
     host.registerAction({ id: "open-another", title: "Flutter: Open Another Tools Panel", description: "Open another independent Flutter Tools panel.", category: "Flutter", kind: "command", danger: "safe", requires: [] }, () => open(false)),
-    host.registerHandler("workspace.connect", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await publish(args.panelId, runtime); return snapshotFor(runtime); }),
-    host.registerHandler("workspace.refresh", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const depth = await host.settings.get<unknown>("projectSearchDepth"); runtime.projects = await discoverFlutterProjects(runtime.binding.worktreePath, typeof depth === "number" ? depth : 5); await refreshDeviceSources(args.panelId, runtime); await publish(args.panelId, runtime); return snapshotFor(runtime); }),
+    host.registerHandler("workspace.connect", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await publish(args.panelId, runtime); return snapshotFor(args.panelId, runtime); }),
+    host.registerHandler("workspace.refresh", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const depth = await host.settings.get<unknown>("projectSearchDepth"); runtime.projects = await discoverFlutterProjects(runtime.binding.worktreePath, typeof depth === "number" ? depth : 5); await refreshDeviceSources(args.panelId, runtime); await publish(args.panelId, runtime); return snapshotFor(args.panelId, runtime); }),
+    host.registerHandler("settings.open", { args: panelArgsSchema, result: operationResultSchema }, async () => { const result = await host.dispatch("app.pluginManager"); if (!result.ok) throw new Error(result.error.message); return { ok: true, message: "Plugin settings opened" }; }),
     host.registerHandler("project.select", { args: setProjectArgsSchema, result: flutterPanelBindingSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const project = runtime.projects.find((item) => path.resolve(item.path) === path.resolve(args.projectPath)); if (!project) throw new Error("Selected Flutter project is outside the discovered worktree projects"); if ([...runtime.sessions.values()].some((session) => isActiveState(session.run?.getSnapshot().state ?? "idle"))) throw new Error("Stop all running applications before changing Flutter project"); for (const [deviceId, session] of runtime.sessions) { flush(args.panelId, deviceId, session); if (session.batchTimer) clearTimeout(session.batchTimer); } runtime.sessions.clear(); runtime.binding = { ...runtime.binding, flutterProjectPath: project.path }; await saveBinding(host, args.panelId, runtime.binding); await publish(args.panelId, runtime); return runtime.binding; }),
-    host.registerHandler("device.select", { args: selectDeviceArgsSchema, result: snapshotSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.devices.some((item) => item.id === args.deviceId)) throw new Error("Selected Flutter device is no longer available"); runtime.selectedDeviceId = args.deviceId; getDeviceRuntime(runtime, args.deviceId); await publish(args.panelId, runtime); return snapshotFor(runtime); }),
+    host.registerHandler("device.select", { args: selectDeviceArgsSchema, result: snapshotSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.devices.some((item) => item.id === args.deviceId)) throw new Error("Selected Flutter device is no longer available"); runtime.selectedDeviceId = args.deviceId; getDeviceRuntime(runtime, args.deviceId); await publish(args.panelId, runtime); return snapshotFor(args.panelId, runtime); }),
     host.registerHandler("run.start", { args: runArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await startDeviceRun(args.panelId, runtime, args.deviceId, { mode: args.mode, entrypoint: args.entrypoint, extraArgs: args.extraArgs }); return { ok: true, message: `Starting on ${args.deviceId}` }; }),
     host.registerHandler("run.reinstall", { args: devicePanelArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const deviceRuntime = getDeviceRuntime(runtime, args.deviceId); const config = deviceRuntime.launchConfig ?? { mode: "debug" as const, extraArgs: [] }; await startDeviceRun(args.panelId, runtime, args.deviceId, config, true); return { ok: true, message: `Reinstalling and restarting on ${args.deviceId}` }; }),
     host.registerHandler("run.control", { args: controlArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const session = runtime.sessions.get(args.deviceId)?.run; if (!session) throw new Error("No Flutter run session exists for the selected device"); if (args.operation === "stop") await session.stop(); else if (args.operation === "detach") await session.detach(); else await session.reload(args.operation === "hotRestart"); await publish(args.panelId, runtime); return { ok: true, message: args.operation === "hotReload" ? "Hot reload complete" : args.operation === "hotRestart" ? "Hot restart complete" : args.operation === "detach" ? "Debugger detached; application left running" : "Application stopped" }; }),
-    host.registerHandler("screenshot.capture", { args: screenshotArgsSchema, result: screenshotResultSchema, requires: ["shell:exec", "fs:user-data-write", "clipboard:write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.daemon) throw new Error("Flutter daemon unavailable"); const device = runtime.devices.find((item) => item.id === args.deviceId); if (!device?.capabilities.screenshot) throw new Error(`${device?.name ?? args.deviceId} does not advertise screenshot support`); const bytes = await runtime.daemon.takeScreenshot(args.deviceId); const directory = screenshotDirectory(host.pluginId); await mkdir(directory, { recursive: true }); const filePath = path.join(directory, `${new Date().toISOString().replaceAll(":", "-")}-${args.deviceId.replace(/[^a-zA-Z0-9._-]/g, "_")}.png`); await writeFile(filePath, bytes); if (args.copyToClipboard) await host.clipboard.writeImage(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)); return { ok: true, message: args.copyToClipboard ? "Screenshot captured and copied" : "Screenshot captured", deviceId: args.deviceId, filePath, dataUrl: `data:image/png;base64,${bytes.toString("base64")}`, copied: args.copyToClipboard }; }),
+    host.registerHandler("recording.start", { args: devicePanelArgsSchema, result: operationResultSchema, requires: ["shell:exec", "fs:user-data-write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const device = runtime.devices.find((candidate) => candidate.id === args.deviceId); if (!device) throw new Error("Selected Flutter device is no longer available"); if (!supportsAndroidRecording(device.platform)) throw new Error("Screen recording is currently supported for Android devices only"); const session = getDeviceRuntime(runtime, args.deviceId); const saveDirectory = await host.settings.get<unknown>("captureExportDirectory"); const destination = await resolveMediaDestination(host.pluginId, "recording", args.deviceId, saveDirectory); session.recordingSaveWarning = destination.warning; const remotePath = createRemoteRecordingPath(randomUUID()); try { await recordingCoordinator.start({ panelId: args.panelId, deviceId: args.deviceId, createRecorder: async (onFinalizing) => { const adbExecutable = await resolveAdbExecutable(); if (session.staleRemoteRecordingPath) { try { await cleanupAndroidRecordingFile(adbExecutable, args.deviceId, session.staleRemoteRecordingPath); session.staleRemoteRecordingPath = null; } catch (error) { append(args.panelId, runtime, args.deviceId, "stderr", `Previous recording cleanup will be retried later: ${errorMessage(error)}`); } } session.staleRemoteRecordingPath = remotePath; return new AndroidScreenRecorder({ adbExecutable, deviceId: args.deviceId, destinationPath: destination.filePath, remotePath, onFinalizing, fallbackDestination: destination.storage === "configured" ? async () => reserveManagedMediaDestination(host.pluginId, "recording", args.deviceId, "Could not write to the capture save folder. The recording was saved in Flutter Tools storage instead.") : undefined }); } }); } catch (error) { await deleteMediaFile(destination.filePath).catch(() => {}); throw error; } await publishRecordingDevice(args.deviceId); return { ok: true, message: `Recording ${device.name}` }; }),
+    host.registerHandler("recording.stop", { args: devicePanelArgsSchema, result: operationResultSchema, requires: ["shell:exec", "fs:user-data-write"] }, async (_ctx, args) => { await recordingCoordinator.stop(args.panelId, args.deviceId); await publishRecordingDevice(args.deviceId); return { ok: true, message: "Screen recording finalized" }; }),
+    host.registerHandler("screenshot.capture", { args: screenshotArgsSchema, result: screenshotResultSchema, requires: ["shell:exec", "fs:user-data-write", "clipboard:write"] }, async (_ctx, args) => {
+      const runtime = await getRuntime(args.panelId, args.initialArgs);
+      if (!runtime.daemon) throw new Error("Flutter daemon unavailable");
+      const device = runtime.devices.find((item) => item.id === args.deviceId);
+      if (!device?.capabilities.screenshot) throw new Error(`${device?.name ?? args.deviceId} does not advertise screenshot support`);
+      const bytes = await runtime.daemon.takeScreenshot(args.deviceId);
+      const saveDirectory = await host.settings.get<unknown>("captureExportDirectory");
+      let destination = await resolveMediaDestination(host.pluginId, "screenshot", args.deviceId, saveDirectory);
+      try {
+        await writeFile(destination.filePath, bytes);
+      } catch (error) {
+        await deleteMediaFile(destination.filePath);
+        if (destination.storage !== "configured") throw error;
+        destination = await reserveManagedMediaDestination(host.pluginId, "screenshot", args.deviceId, `Could not write to the capture save folder (${errorMessage(error)}). The screenshot was saved in Flutter Tools storage instead.`);
+        try { await writeFile(destination.filePath, bytes); }
+        catch (fallbackError) { await deleteMediaFile(destination.filePath).catch(() => {}); throw fallbackError; }
+      }
+      if (args.copyToClipboard) await host.clipboard.writeImage(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+      const capturedAt = new Date().toISOString();
+      addMedia(runtime, args.deviceId, { id: destination.filePath, deviceId: args.deviceId, kind: "screenshot", filePath: destination.filePath, saveWarning: destination.warning, createdAt: capturedAt, durationSeconds: null });
+      const baseMessage = args.copyToClipboard ? "Screenshot captured and copied" : "Screenshot captured";
+      await publish(args.panelId, runtime);
+      return { ok: true, message: destination.warning ? `${baseMessage}. ${destination.warning}` : baseMessage, deviceId: args.deviceId, filePath: destination.filePath, dataUrl: `data:image/png;base64,${bytes.toString("base64")}`, copied: args.copyToClipboard, saveWarning: destination.warning };
+    }),
     host.registerHandler("devtools.open", { args: devicePanelArgsSchema, result: operationResultSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const run = runtime.sessions.get(args.deviceId)?.run?.getSnapshot(); const url = run?.devToolsUri ?? (run?.vmServiceUri ? `https://devtools.flutter.dev/?uri=${encodeURIComponent(run.vmServiceUri)}` : null); if (!url) throw new Error("DevTools becomes available after the selected device's VM service connects"); const result = await host.dispatch("browser.openUrl", { url }); if (!result.ok) throw new Error(result.error.message); return { ok: true, message: "DevTools opened" }; }),
-    host.registerHandler("screenshot.copy", { args: z.object({ filePath: z.string().min(1) }), result: operationResultSchema, requires: ["fs:user-data-write", "clipboard:write"] }, async (_ctx, args) => { if (!isOwnedScreenshotPath(host.pluginId, args.filePath)) throw new Error("Only screenshots created by Flutter Tools can be copied"); const bytes = await readFile(path.resolve(args.filePath)); await host.clipboard.writeImage(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)); return { ok: true, message: "Screenshot copied" }; }),
-    host.registerHandler("screenshot.open", { args: z.object({ filePath: z.string().min(1) }), result: operationResultSchema, requires: ["fs:user-data-write"] }, async (_ctx, args) => { if (!isOwnedScreenshotPath(host.pluginId, args.filePath)) throw new Error("Only screenshots created by Flutter Tools can be opened"); await host.system.openPath(path.resolve(args.filePath)); return { ok: true, message: "Screenshot opened" }; }),
-    host.registerHandler("screenshot.delete", { args: z.object({ filePath: z.string().min(1) }), result: operationResultSchema, requires: ["fs:user-data-write"] }, async (_ctx, args) => { if (!isOwnedScreenshotPath(host.pluginId, args.filePath)) throw new Error("Only screenshots created by Flutter Tools can be deleted"); try { await unlink(path.resolve(args.filePath)); } catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; } return { ok: true, message: "Screenshot deleted" }; }),
+    host.registerHandler("screenshot.copy", { args: panelMediaFileArgsSchema, result: operationResultSchema, requires: ["fs:user-data-write", "clipboard:write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const item = getDeviceRuntime(runtime, args.deviceId).media.find((candidate) => candidate.filePath === args.filePath && candidate.kind === "screenshot"); if (!item) throw new Error("This screenshot does not belong to the selected device"); const bytes = await readFile(path.resolve(item.filePath)); await host.clipboard.writeImage(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)); return { ok: true, message: "Screenshot copied" }; }),
+    host.registerHandler("media.open", { args: panelMediaFileArgsSchema, result: operationResultSchema, requires: ["fs:user-data-write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const item = getDeviceRuntime(runtime, args.deviceId).media.find((candidate) => candidate.filePath === args.filePath); if (!item) throw new Error("This media item does not belong to the selected device"); if (isOwnedMediaPath(host.pluginId, item.filePath)) await host.system.openPath(path.resolve(item.filePath)); else await openExternalSavedMedia(path.resolve(item.filePath), false); return { ok: true, message: "Media opened" }; }),
+    host.registerHandler("media.reveal", { args: panelMediaFileArgsSchema, result: operationResultSchema, requires: ["fs:user-data-write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const item = getDeviceRuntime(runtime, args.deviceId).media.find((candidate) => candidate.filePath === args.filePath); if (!item) throw new Error("This media item does not belong to the selected device"); if (isOwnedMediaPath(host.pluginId, item.filePath)) await host.system.showItemInFolder(path.resolve(item.filePath)); else await openExternalSavedMedia(path.resolve(item.filePath), true); return { ok: true, message: "Media revealed" }; }),
+    host.registerHandler("media.delete", { args: deleteMediaArgsSchema, result: operationResultSchema, requires: ["fs:user-data-write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const session = getDeviceRuntime(runtime, args.deviceId); const item = session.media.find((candidate) => candidate.filePath === args.filePath); if (!item) throw new Error("This media item does not belong to the selected device"); if (args.deleteFile) await deleteMediaFile(item.filePath); session.media = session.media.filter((candidate) => candidate.filePath !== args.filePath); await publish(args.panelId, runtime); return { ok: true, message: args.deleteFile ? "Media reference and file deleted" : "Media reference removed; file kept" }; }),
     host.registerHandler("console.clear", { args: devicePanelArgsSchema, result: operationResultSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const session = getDeviceRuntime(runtime, args.deviceId); session.console.clear(); session.pendingRecords = []; session.sequence = 0; await publish(args.panelId, runtime); return { ok: true, message: "Console cleared" }; }),
     host.registerHandler("console.copy", { args: z.object({ text: z.string().max(8 * 1024 * 1024) }), result: operationResultSchema, requires: ["clipboard:write"] }, async (_ctx, args) => { await host.clipboard.writeText(args.text); return { ok: true, message: "Console copied" }; }),
   ]);
 
   return async () => {
+    await recordingCoordinator.dispose().catch(() => {});
     await Promise.all([...runtimes.keys()].map((panelId) => disposeRuntime(panelId)));
   };
 }
