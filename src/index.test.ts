@@ -24,7 +24,7 @@ describe("Flutter Tools activation", () => {
     const host = createMockHost({ capabilities: ["shell:exec", "fs:project-read", "fs:user-data-write", "clipboard:write"], activeWorktree: worktree(), worktrees: [worktree()] });
     await activate(host);
     expect(host.registeredActions.map((item) => item.descriptor)).toEqual(expect.arrayContaining([expect.objectContaining({ id: "open", requires: [] }), expect.objectContaining({ id: "open-another", requires: [] })]));
-    expect(host.registeredHandlers.map((item) => item.channel)).toEqual(expect.arrayContaining(["workspace.connect", "settings.open", "run.start", "run.reinstall", "run.control", "recording.start", "recording.stop", "screenshot.capture", "screenshot.copy", "media.open", "media.reveal", "media.delete"]));
+    expect(host.registeredHandlers.map((item) => item.channel)).toEqual(expect.arrayContaining(["workspace.connect", "settings.open", "launchParameters.set", "run.start", "run.reinstall", "run.control", "recording.start", "recording.stop", "screenshot.capture", "screenshot.copy", "media.open", "media.reveal", "media.delete"]));
     expect(host.registeredHandlers.map((item) => item.channel)).not.toEqual(expect.arrayContaining(["screenshot.open", "screenshot.delete"]));
     expect(host.registeredHandlers.map((item) => item.channel)).not.toContain("workspace.disconnect");
   });

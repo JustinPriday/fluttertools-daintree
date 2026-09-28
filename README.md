@@ -25,7 +25,7 @@ This is especially useful when several worktrees run different revisions of an a
 - Bounded discovery of Flutter apps nested within the owning worktree.
 - Flutter SDK resolution from plugin settings, a worktree-local FVM SDK, or `PATH`.
 - Live physical-device, emulator, simulator, desktop, and web target discovery through `flutter daemon`.
-- Independent debug sessions for multiple devices in one panel.
+- Independent debug or release sessions for multiple devices in one panel.
 - Run, Stop, Detach, Hot Reload, Hot Restart, and confirmed Reinstall & Restart controls.
 - Structured per-device console with bounded history, filtering, copy, clear, and follow-tail controls.
 - Session-specific Flutter DevTools launch inside Daintree's browser.
@@ -66,9 +66,11 @@ No package is installed into your Flutter application. Flutter Tools uses your e
 Opening Flutter Tools binds the panel to the visible worktree. The plugin searches that worktree for Flutter projects and resolves a Flutter SDK. If more than one app is found, choose the app from project settings in the panel header.
 
 - Select a target from the device picker, then choose **Run** to start a debug session.
+- Long-press or right-click **Run**, then choose **Install & run release** to build, install, and launch an optimized release version on the selected target. Release sessions intentionally disable debugging, DevTools, Hot Reload, and Hot Restart.
 - Switch devices without stopping sessions already running on other targets.
 - Use **Hot Reload** or **Hot Restart** when the selected debug target supports it.
 - Long-press **Hot Restart** to confirm **Reinstall & Restart**, which permanently removes all app data stored on the Android or iOS device before launching the same run configuration.
+- Open project settings to manage searchable Dart defines for each Flutter project/worktree. Set definitions are passed as individual `--dart-define=NAME=value` arguments on the next full launch; unset definitions remain saved for quick reuse.
 - Filter, copy, or clear the selected device's console. Scroll upward to pause follow-tail, then choose **Resume live tail** to return to current output.
 - Open the connected session in Flutter DevTools after its VM service becomes available.
 - Capture a screenshot when the selected device supports it, then preview, open, reveal, copy, or remove the saved PNG.
@@ -199,7 +201,7 @@ tools/                       Deterministic build, packaging, and release helpers
 
 - macOS is the only fully acceptance-tested host platform.
 - Flutter projects must currently live inside the bound Daintree worktree.
-- The panel currently launches debug mode with Flutter's default entrypoint and arguments.
+- The panel launches debug mode by default and offers release mode from a long-press or right-click on Run. Both use Flutter's default entrypoint. Dart defines can be configured per Flutter project/worktree; other launch arguments are not yet exposed.
 - Emulator and simulator creation or launch is not included; start them with existing platform or Flutter tools.
 - Attaching to an app started outside Flutter Tools is not included.
 - Screenshot availability remains device-dependent.

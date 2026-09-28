@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
 import { FlutterMachineProcess, type MachineMessage } from "./machine.js";
-import type { RunState } from "../shared/contracts.js";
+import type { RunMode, RunState } from "../shared/contracts.js";
 
 function record(value: unknown): Record<string, unknown> | null { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 
 export interface RunSessionSnapshot {
   state: RunState;
+  mode: RunMode;
   appId: string | null;
   deviceId: string;
   vmServiceUri: string | null;
@@ -14,7 +15,7 @@ export interface RunSessionSnapshot {
   error: string | null;
 }
 
-export function buildRunArguments(options: { deviceId: string; mode: "debug" | "profile" | "release"; entrypoint?: string; extraArgs?: string[] }): string[] {
+export function buildRunArguments(options: { deviceId: string; mode: RunMode; entrypoint?: string; extraArgs?: string[] }): string[] {
   const args = ["run", "--machine", "-d", options.deviceId];
   if (options.mode !== "debug") args.push(`--${options.mode}`);
   if (options.entrypoint?.trim()) args.push("-t", options.entrypoint.trim());
@@ -26,11 +27,11 @@ export class FlutterRunSession extends EventEmitter {
   private readonly machine: FlutterMachineProcess;
   private snapshot: RunSessionSnapshot;
 
-  constructor(options: { executable: string; projectPath: string; deviceId: string; mode: "debug" | "profile" | "release"; entrypoint?: string; extraArgs?: string[] }) {
+  constructor(options: { executable: string; projectPath: string; deviceId: string; mode: RunMode; entrypoint?: string; extraArgs?: string[] }) {
     super();
     const args = buildRunArguments(options);
     this.machine = new FlutterMachineProcess({ executable: options.executable, args, cwd: options.projectPath });
-    this.snapshot = { state: "idle", appId: null, deviceId: options.deviceId, vmServiceUri: null, devToolsUri: null, startedAt: null, error: null };
+    this.snapshot = { state: "idle", mode: options.mode, appId: null, deviceId: options.deviceId, vmServiceUri: null, devToolsUri: null, startedAt: null, error: null };
     this.machine.on("message", (message: MachineMessage) => this.onMessage(message));
     this.machine.on("stdout", (text: string) => this.emit("output", "stdout", text));
     this.machine.on("stderr", (text: string) => this.emit("output", "stderr", text));
@@ -46,6 +47,7 @@ export class FlutterRunSession extends EventEmitter {
   start(): void { this.update({ state: "starting", startedAt: new Date().toISOString(), error: null }); this.machine.start(); }
 
   async reload(fullRestart: boolean): Promise<void> {
+    if (this.snapshot.mode !== "debug") throw new Error(`Hot ${fullRestart ? "restart" : "reload"} is unavailable for ${this.snapshot.mode} builds`);
     if (!this.snapshot.appId || this.snapshot.state !== "running") throw new Error("No running Flutter application is ready");
     this.update({ state: fullRestart ? "restarting" : "reloading" });
     try {

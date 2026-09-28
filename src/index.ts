@@ -11,13 +11,14 @@ import { FlutterRunSession } from "./flutter/runSession.js";
 import { uninstallFlutterApp } from "./flutter/uninstall.js";
 import { ConsoleBuffer } from "./shared/consoleBuffer.js";
 import {
-  consoleBatchSchema, controlArgsSchema, deleteMediaArgsSchema, devicePanelArgsSchema, flutterPanelBindingSchema, operationResultSchema, panelArgsSchema,
-  panelMediaFileArgsSchema, runArgsSchema, screenshotArgsSchema, screenshotResultSchema, selectDeviceArgsSchema, setProjectArgsSchema,
-  snapshotSchema, type ConsoleRecord, type FlutterPanelBinding, type FlutterProject, type FlutterWorkspaceSnapshot,
+  consoleBatchSchema, controlArgsSchema, deleteMediaArgsSchema, devicePanelArgsSchema, flutterPanelBindingSchema, launchParametersSchema, operationResultSchema, panelArgsSchema,
+  panelMediaFileArgsSchema, runArgsSchema, screenshotArgsSchema, screenshotResultSchema, selectDeviceArgsSchema, setLaunchParametersArgsSchema, setProjectArgsSchema,
+  snapshotSchema, type ConsoleRecord, type FlutterPanelBinding, type FlutterProject, type FlutterWorkspaceSnapshot, type LaunchParameters, type RunMode,
 } from "./shared/contracts.js";
 import { createRemoteRecordingPath, deleteMediaFile, isOwnedMediaPath, reserveManagedMediaDestination, resolveMediaDestination } from "./media/storage.js";
 import { AndroidScreenRecorder, cleanupAndroidRecordingFile, resolveAdbExecutable, supportsAndroidRecording } from "./flutter/androidRecording.js";
 import { RecordingCoordinator } from "./flutter/recordingCoordinator.js";
+import { applyLaunchParameters, launchParameterIdentity, LaunchParameterStore } from "./flutter/launchParameters.js";
 
 const PANEL_KIND = "justinpriday.flutter-tools.workspace";
 const BINDINGS_KEY = "panel-bindings-v1";
@@ -30,13 +31,14 @@ interface PanelRuntime {
   devices: FlutterWorkspaceSnapshot["devices"];
   selectedDeviceId: string | null;
   toolError: string | null;
+  launchParameters: LaunchParameters;
   refreshPromise: Promise<void> | null;
   sessions: Map<string, DeviceRuntime>;
 }
 
 interface DeviceRuntime {
   run: FlutterRunSession | null;
-  launchConfig: { mode: "debug" | "profile" | "release"; entrypoint?: string; extraArgs: string[] } | null;
+  launchConfig: { mode: RunMode; entrypoint?: string; extraArgs: string[] } | null;
   launchPromise: Promise<void> | null;
   console: ConsoleBuffer;
   pendingRecords: ConsoleRecord[];
@@ -49,7 +51,7 @@ interface DeviceRuntime {
 
 type StoredBindings = Record<string, FlutterPanelBinding>;
 
-function emptyRun(): FlutterWorkspaceSnapshot["run"] { return { state: "idle", appId: null, deviceId: null, vmServiceUri: null, devToolsUri: null, startedAt: null, error: null }; }
+function emptyRun(): FlutterWorkspaceSnapshot["run"] { return { state: "idle", mode: null, appId: null, deviceId: null, vmServiceUri: null, devToolsUri: null, startedAt: null, error: null }; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 async function openExternalSavedMedia(filePath: string, reveal: boolean): Promise<void> {
   if (process.platform !== "darwin") throw new Error("Opening a custom capture save location is currently supported on macOS only");
@@ -121,6 +123,7 @@ function badge(runtime: PanelRuntime): PluginPanelBadge {
 
 export async function activate(host: PluginHostApi): Promise<() => void> {
   const runtimes = new Map<string, PanelRuntime>();
+  const launchParameterStore = new LaunchParameterStore(host.storage);
   let recordingCoordinator: RecordingCoordinator;
 
   const getDeviceRuntime = (runtime: PanelRuntime, deviceId: string): DeviceRuntime => {
@@ -140,10 +143,11 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
       binding: runtime.binding, projects: runtime.projects, devices: runtime.devices,
       selectedDeviceId: runtime.selectedDeviceId, sdk: runtime.executable,
       toolError: runtime.toolError,
+      launchParameters: runtime.launchParameters,
       run: selected?.run?.getSnapshot() ?? emptyRun(),
       recording: recordingCoordinator.getSnapshot(panelId, runtime.selectedDeviceId),
       media: selected?.media ?? [],
-      sessions: [...runtime.sessions.entries()].map(([deviceId, session]) => { const run = session.run?.getSnapshot() ?? emptyRun(); return { deviceId, state: run.state, appId: run.appId, startedAt: run.startedAt }; }),
+      sessions: [...runtime.sessions.entries()].map(([deviceId, session]) => { const run = session.run?.getSnapshot() ?? emptyRun(); return { deviceId, state: run.state, mode: run.mode, appId: run.appId, startedAt: run.startedAt }; }),
       console: selected?.console.snapshot() ?? [], sequence: selected?.sequence ?? 0,
     });
   };
@@ -215,12 +219,15 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
       if (!device) throw new Error("Selected Flutter device is no longer available");
       if (reinstall && !supportsAppReinstall(device)) throw new Error("Reinstall & Restart is supported for Android and iOS devices only");
       if (!runtime.executable) throw new Error("Flutter SDK unavailable");
+      const effectiveExtraArgs = applyLaunchParameters(config.extraArgs, runtime.launchParameters);
+      const defineCount = runtime.launchParameters.dartDefines.filter((define) => define.enabled).length;
       await deviceRuntime.run?.stop();
       deviceRuntime.console.clear();
       deviceRuntime.pendingRecords = [];
       deviceRuntime.sequence = 0;
-      deviceRuntime.launchConfig = { ...config, extraArgs: [...config.extraArgs] };
-      append(panelId, runtime, deviceId, "system", reinstall ? "Reinstall & Restart: removing the installed app and its local data." : "Starting Flutter application.");
+      deviceRuntime.launchConfig = { ...config, extraArgs: [...effectiveExtraArgs] };
+      const modeLabel = config.mode === "debug" ? "" : ` ${config.mode}`;
+      append(panelId, runtime, deviceId, "system", reinstall ? "Reinstall & Restart: removing the installed app and its local data." : `Starting Flutter${modeLabel} application${defineCount ? ` with ${defineCount} Dart ${defineCount === 1 ? "define" : "defines"}` : ""}.`);
       await publish(panelId, runtime);
       if (reinstall) {
         await uninstallFlutterApp({
@@ -228,7 +235,7 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
           projectPath: runtime.binding.flutterProjectPath,
           deviceId,
           mode: config.mode,
-          extraArgs: config.extraArgs,
+          extraArgs: effectiveExtraArgs,
           onOutput: (stream, text) => append(panelId, runtime, deviceId, stream, text),
         });
         append(panelId, runtime, deviceId, "system", "Uninstall complete. Launching the Flutter application.");
@@ -239,7 +246,7 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
         deviceId,
         mode: config.mode,
         entrypoint: config.entrypoint,
-        extraArgs: config.extraArgs,
+        extraArgs: effectiveExtraArgs,
       });
       deviceRuntime.run = session;
       session.on("output", (stream: ConsoleRecord["stream"], text: string) => append(panelId, runtime, deviceId, stream, text));
@@ -338,7 +345,8 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     const sdkSetting = await host.settings.get<unknown>("flutterSdkPath");
     const resolvedExecutable = await resolveFlutterExecutable(binding.worktreePath, typeof sdkSetting === "string" ? sdkSetting : undefined);
     const executable = { ...resolvedExecutable, version: await inspectFlutterVersion(resolvedExecutable.executable) };
-    const runtime: PanelRuntime = { binding, projects, executable, daemon: null, devices: [], selectedDeviceId: null, toolError: null, refreshPromise: null, sessions: new Map() };
+    const launchParameters = await launchParameterStore.load(binding);
+    const runtime: PanelRuntime = { binding, projects, executable, daemon: null, devices: [], selectedDeviceId: null, toolError: null, launchParameters, refreshPromise: null, sessions: new Map() };
     runtimes.set(panelId, runtime);
     await saveBinding(host, panelId, binding);
     await refreshDeviceSources(panelId, runtime);
@@ -362,9 +370,10 @@ export async function activate(host: PluginHostApi): Promise<() => void> {
     host.registerHandler("workspace.connect", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await publish(args.panelId, runtime); return snapshotFor(args.panelId, runtime); }),
     host.registerHandler("workspace.refresh", { args: panelArgsSchema, result: snapshotSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const depth = await host.settings.get<unknown>("projectSearchDepth"); runtime.projects = await discoverFlutterProjects(runtime.binding.worktreePath, typeof depth === "number" ? depth : 5); await refreshDeviceSources(args.panelId, runtime); await publish(args.panelId, runtime); return snapshotFor(args.panelId, runtime); }),
     host.registerHandler("settings.open", { args: panelArgsSchema, result: operationResultSchema }, async () => { const result = await host.dispatch("app.pluginManager"); if (!result.ok) throw new Error(result.error.message); return { ok: true, message: "Plugin settings opened" }; }),
-    host.registerHandler("project.select", { args: setProjectArgsSchema, result: flutterPanelBindingSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const project = runtime.projects.find((item) => path.resolve(item.path) === path.resolve(args.projectPath)); if (!project) throw new Error("Selected Flutter project is outside the discovered worktree projects"); if ([...runtime.sessions.values()].some((session) => isActiveState(session.run?.getSnapshot().state ?? "idle"))) throw new Error("Stop all running applications before changing Flutter project"); for (const [deviceId, session] of runtime.sessions) { flush(args.panelId, deviceId, session); if (session.batchTimer) clearTimeout(session.batchTimer); } runtime.sessions.clear(); runtime.binding = { ...runtime.binding, flutterProjectPath: project.path }; await saveBinding(host, args.panelId, runtime.binding); await publish(args.panelId, runtime); return runtime.binding; }),
+    host.registerHandler("project.select", { args: setProjectArgsSchema, result: flutterPanelBindingSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const project = runtime.projects.find((item) => path.resolve(item.path) === path.resolve(args.projectPath)); if (!project) throw new Error("Selected Flutter project is outside the discovered worktree projects"); if ([...runtime.sessions.values()].some((session) => isActiveState(session.run?.getSnapshot().state ?? "idle"))) throw new Error("Stop all running applications before changing Flutter project"); for (const [deviceId, session] of runtime.sessions) { flush(args.panelId, deviceId, session); if (session.batchTimer) clearTimeout(session.batchTimer); } runtime.sessions.clear(); runtime.binding = { ...runtime.binding, flutterProjectPath: project.path }; runtime.launchParameters = await launchParameterStore.load(runtime.binding); await saveBinding(host, args.panelId, runtime.binding); await publish(args.panelId, runtime); return runtime.binding; }),
+    host.registerHandler("launchParameters.set", { args: setLaunchParametersArgsSchema, result: launchParametersSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const saved = await launchParameterStore.save(runtime.binding, args.launchParameters); const identity = launchParameterIdentity(runtime.binding); const affected = [...runtimes.entries()].filter(([, candidate]) => launchParameterIdentity(candidate.binding) === identity); await Promise.all(affected.map(async ([panelId, candidate]) => { candidate.launchParameters = { dartDefines: saved.dartDefines.map((define) => ({ ...define })) }; await publish(panelId, candidate); })); return saved; }),
     host.registerHandler("device.select", { args: selectDeviceArgsSchema, result: snapshotSchema }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); if (!runtime.devices.some((item) => item.id === args.deviceId)) throw new Error("Selected Flutter device is no longer available"); runtime.selectedDeviceId = args.deviceId; getDeviceRuntime(runtime, args.deviceId); await publish(args.panelId, runtime); return snapshotFor(args.panelId, runtime); }),
-    host.registerHandler("run.start", { args: runArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await startDeviceRun(args.panelId, runtime, args.deviceId, { mode: args.mode, entrypoint: args.entrypoint, extraArgs: args.extraArgs }); return { ok: true, message: `Starting on ${args.deviceId}` }; }),
+    host.registerHandler("run.start", { args: runArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); await startDeviceRun(args.panelId, runtime, args.deviceId, { mode: args.mode, entrypoint: args.entrypoint, extraArgs: args.extraArgs }); return { ok: true, message: `Starting ${args.mode} build on ${args.deviceId}` }; }),
     host.registerHandler("run.reinstall", { args: devicePanelArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const deviceRuntime = getDeviceRuntime(runtime, args.deviceId); const config = deviceRuntime.launchConfig ?? { mode: "debug" as const, extraArgs: [] }; await startDeviceRun(args.panelId, runtime, args.deviceId, config, true); return { ok: true, message: `Reinstalling and restarting on ${args.deviceId}` }; }),
     host.registerHandler("run.control", { args: controlArgsSchema, result: operationResultSchema, requires: ["shell:exec"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const session = runtime.sessions.get(args.deviceId)?.run; if (!session) throw new Error("No Flutter run session exists for the selected device"); if (args.operation === "stop") await session.stop(); else if (args.operation === "detach") await session.detach(); else await session.reload(args.operation === "hotRestart"); await publish(args.panelId, runtime); return { ok: true, message: args.operation === "hotReload" ? "Hot reload complete" : args.operation === "hotRestart" ? "Hot restart complete" : args.operation === "detach" ? "Debugger detached; application left running" : "Application stopped" }; }),
     host.registerHandler("recording.start", { args: devicePanelArgsSchema, result: operationResultSchema, requires: ["shell:exec", "fs:user-data-write"] }, async (_ctx, args) => { const runtime = await getRuntime(args.panelId, args.initialArgs); const device = runtime.devices.find((candidate) => candidate.id === args.deviceId); if (!device) throw new Error("Selected Flutter device is no longer available"); if (!supportsAndroidRecording(device.platform)) throw new Error("Screen recording is currently supported for Android devices only"); const session = getDeviceRuntime(runtime, args.deviceId); const saveDirectory = await host.settings.get<unknown>("captureExportDirectory"); const destination = await resolveMediaDestination(host.pluginId, "recording", args.deviceId, saveDirectory); session.recordingSaveWarning = destination.warning; const remotePath = createRemoteRecordingPath(randomUUID()); try { await recordingCoordinator.start({ panelId: args.panelId, deviceId: args.deviceId, createRecorder: async (onFinalizing) => { const adbExecutable = await resolveAdbExecutable(); if (session.staleRemoteRecordingPath) { try { await cleanupAndroidRecordingFile(adbExecutable, args.deviceId, session.staleRemoteRecordingPath); session.staleRemoteRecordingPath = null; } catch (error) { append(args.panelId, runtime, args.deviceId, "stderr", `Previous recording cleanup will be retried later: ${errorMessage(error)}`); } } session.staleRemoteRecordingPath = remotePath; return new AndroidScreenRecorder({ adbExecutable, deviceId: args.deviceId, destinationPath: destination.filePath, remotePath, onFinalizing, fallbackDestination: destination.storage === "configured" ? async () => reserveManagedMediaDestination(host.pluginId, "recording", args.deviceId, "Could not write to the capture save folder. The recording was saved in Flutter Tools storage instead.") : undefined }); } }); } catch (error) { await deleteMediaFile(destination.filePath).catch(() => {}); throw error; } await publishRecordingDevice(args.deviceId); return { ok: true, message: `Recording ${device.name}` }; }),

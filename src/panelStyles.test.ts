@@ -25,7 +25,7 @@ describe("Flutter Tools panel layout policy", () => {
     expect(panelStyles).toContain("grid-template-columns:repeat(auto-fill,minmax(220px,1fr))");
     expect(panelStyles).toContain(".ft-shot-delete{position:absolute;top:7px;right:7px");
     expect(panelStyles).toContain(".ft-media-actions{position:absolute;z-index:2;top:7px;left:7px");
-    expect(panelStyles).toContain("@container flutter-tools (max-width:420px)");
+    expect(panelStyles).toContain("@container flutter-tools (max-width:480px)");
     expect(panelStyles).toContain(".ft-media{grid-template-columns:minmax(0,1fr);padding:8px}");
   });
 
@@ -33,6 +33,20 @@ describe("Flutter Tools panel layout policy", () => {
     expect(panelStyles).toContain(".ft-record-btn{width:29px;min-width:29px");
     expect(panelStyles).toContain(".ft-record-btn.active{width:auto;min-width:72px");
     expect(panelStyles).not.toContain(".ft-record-btn span{display:none}");
+  });
+
+  it("keeps launch parameters discoverable and responsive without occupying the default toolbar", () => {
+    expect(panelStyles).toContain(".ft-param-chip");
+    expect(panelStyles).toContain(".ft-params-dialog");
+    expect(panelStyles).toContain(".ft-param-row");
+    expect(panelStyles).toContain("max-width:480px");
+  });
+
+  it("keeps release launch behind the existing Run control", () => {
+    expect(panelStyles).toContain(".ft-run-action{position:relative;display:inline-flex}");
+    expect(panelStyles).toContain(".ft-run-popover{position:absolute");
+    expect(panelStyles).toContain(".ft-run-option");
+    expect(panelStyles).toContain(".ft-mode-badge");
   });
 
   it("wraps long recovery diagnostics instead of truncating them", () => {

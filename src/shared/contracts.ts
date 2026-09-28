@@ -35,9 +35,29 @@ export type ConsoleRecord = z.infer<typeof consoleRecordSchema>;
 
 export const runStateSchema = z.enum(["idle", "starting", "running", "reloading", "restarting", "stopping", "stopped", "detached", "failed"]);
 export type RunState = z.infer<typeof runStateSchema>;
+export const runModeSchema = z.enum(["debug", "profile", "release"]);
+export type RunMode = z.infer<typeof runModeSchema>;
 
-export const runSnapshotSchema = z.object({ state: runStateSchema, appId: z.string().nullable(), deviceId: z.string().nullable(), vmServiceUri: z.string().nullable(), devToolsUri: z.string().nullable(), startedAt: z.string().nullable(), error: z.string().nullable() });
-export const deviceSessionSchema = z.object({ deviceId: z.string().min(1), state: runStateSchema, appId: z.string().nullable(), startedAt: z.string().nullable() });
+export const dartDefineSchema = z.object({
+  key: z.string().trim().min(1, "Define name is required").max(128).regex(/^[^\s=]+$/, "Define names cannot contain spaces or ="),
+  value: z.string().max(4096),
+  enabled: z.boolean().default(true),
+});
+export type DartDefine = z.infer<typeof dartDefineSchema>;
+
+export const launchParametersSchema = z.object({
+  dartDefines: z.array(dartDefineSchema).max(40),
+}).superRefine((parameters, context) => {
+  const seen = new Set<string>();
+  parameters.dartDefines.forEach((define, index) => {
+    if (seen.has(define.key)) context.addIssue({ code: "custom", path: ["dartDefines", index, "key"], message: "Define names must be unique" });
+    seen.add(define.key);
+  });
+});
+export type LaunchParameters = z.infer<typeof launchParametersSchema>;
+
+export const runSnapshotSchema = z.object({ state: runStateSchema, mode: runModeSchema.nullable().default(null), appId: z.string().nullable(), deviceId: z.string().nullable(), vmServiceUri: z.string().nullable(), devToolsUri: z.string().nullable(), startedAt: z.string().nullable(), error: z.string().nullable() });
+export const deviceSessionSchema = z.object({ deviceId: z.string().min(1), state: runStateSchema, mode: runModeSchema.nullable().default(null), appId: z.string().nullable(), startedAt: z.string().nullable() });
 
 export const recordingStateSchema = z.enum(["idle", "starting", "recording", "stopping", "finalizing", "failed"]);
 export const recordingSnapshotSchema = z.object({
@@ -67,6 +87,7 @@ export const snapshotSchema = z.object({
   selectedDeviceId: z.string().nullable(),
   sdk: z.object({ executable: z.string(), source: z.enum(["setting", "fvm", "path"]), version: z.string().nullable() }).nullable(),
   toolError: z.string().nullable(),
+  launchParameters: launchParametersSchema.default({ dartDefines: [] }),
   run: runSnapshotSchema,
   recording: recordingSnapshotSchema.default({ state: "idle", deviceId: null, startedAt: null, error: null, ownedByPanel: true }),
   media: z.array(mediaItemSchema).default([]),
@@ -80,7 +101,8 @@ export const panelArgsSchema = z.object({ panelId: z.string().min(1), initialArg
 export const setProjectArgsSchema = panelArgsSchema.extend({ projectPath: z.string().min(1) });
 export const selectDeviceArgsSchema = panelArgsSchema.extend({ deviceId: z.string().min(1) });
 export const devicePanelArgsSchema = panelArgsSchema.extend({ deviceId: z.string().min(1) });
-export const runArgsSchema = devicePanelArgsSchema.extend({ mode: z.enum(["debug", "profile", "release"]).default("debug"), entrypoint: z.string().optional(), extraArgs: z.array(z.string()).max(40).default([]) });
+export const runArgsSchema = devicePanelArgsSchema.extend({ mode: runModeSchema.default("debug"), entrypoint: z.string().optional(), extraArgs: z.array(z.string()).max(40).default([]) });
+export const setLaunchParametersArgsSchema = panelArgsSchema.extend({ launchParameters: launchParametersSchema });
 export const controlArgsSchema = devicePanelArgsSchema.extend({ operation: z.enum(["hotReload", "hotRestart", "stop", "detach"]) });
 export const screenshotArgsSchema = devicePanelArgsSchema.extend({ copyToClipboard: z.boolean().default(false) });
 
