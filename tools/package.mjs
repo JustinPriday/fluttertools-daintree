@@ -12,8 +12,12 @@ const legalFiles = ["LICENSE", "THIRD_PARTY_NOTICES.md"];
 
 async function copyRuntimeFiles() {
   await mkdir(path.join(stageRoot, "dist"), { recursive: true });
+  await mkdir(path.join(stageRoot, "icons"), { recursive: true });
   const runtimeBundles = (await readdir(path.join(projectRoot, "dist"))).filter((entry) =>
     entry.endsWith(".js")
+  );
+  const icons = (await readdir(path.join(projectRoot, "icons"))).filter((entry) =>
+    entry.endsWith(".svg")
   );
   await Promise.all([
     copyFile(path.join(projectRoot, "plugin.json"), path.join(stageRoot, "plugin.json")),
@@ -22,6 +26,9 @@ async function copyRuntimeFiles() {
     ),
     ...runtimeBundles.map((entry) =>
       copyFile(path.join(projectRoot, "dist", entry), path.join(stageRoot, "dist", entry))
+    ),
+    ...icons.map((entry) =>
+      copyFile(path.join(projectRoot, "icons", entry), path.join(stageRoot, "icons", entry))
     ),
   ]);
 }

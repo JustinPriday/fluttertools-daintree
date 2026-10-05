@@ -7,7 +7,7 @@
   "category": "workspace",
   "main": "dist/index.js",
   "engines": {
-    "daintree": ">=0.29.0"
+    "daintree": ">=0.41.0"
   },
   "capabilities": [
     "shell:exec",
@@ -28,7 +28,7 @@
       {
         "id": "workspace",
         "name": "Flutter Tools",
-        "iconId": "monitor-play",
+        "iconId": "./icons/flutter.svg",
         "color": "var(--theme-category-cyan)",
         "showInPalette": false
       }
@@ -76,7 +76,7 @@
       {
         "id": "open-tools",
         "label": "Open Flutter Tools",
-        "iconId": "monitor-play",
+        "iconId": "./icons/flutter.svg",
         "actionId": "justinpriday.flutter-tools.open",
         "priority": 3
       }

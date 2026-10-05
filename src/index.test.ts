@@ -1,4 +1,4 @@
-import { createMockHost } from "@daintreehq/plugin-testing";
+import { createMockHost } from "@daintreehq/plugin-sdk/testing";
 import type { PluginWorktreeSnapshot } from "@daintreehq/plugin-sdk";
 import { describe, expect, it, vi } from "vitest";
 import { homedir } from "node:os";

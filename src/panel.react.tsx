@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { PanelViewProps } from "@daintreehq/plugin-sdk";
-import { useHostChannel, usePluginPanelEvent } from "@daintreehq/plugin-sdk/react";
+import { useHostChannel, useNow, usePluginPanelEvent } from "@daintreehq/plugin-sdk/react";
+import * as UI from "@daintreehq/plugin-ui";
 import { supportsAppReinstall } from "./flutter/device.js";
 import { LaunchParametersEditor } from "./launchParameters.react.js";
 import { formatDuration, recordingControl } from "./media/presentation.js";
@@ -13,29 +14,29 @@ interface ScreenshotPreview { dataUrl: string; copied: boolean }
 interface OperationResponse { ok: boolean; message: string }
 const MAX_RENDERED_LINES = 1_200;
 
-const ICON_PATHS: Record<IconName, React.ReactNode> = {
-  camera: <><path d="M4 8h3l1.5-2h7L17 8h3v11H4Z"/><circle cx="12" cy="13" r="3.5"/></>,
-  close: <><path d="m7 7 10 10"/><path d="M17 7 7 17"/></>,
-  copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
-  detach: <><path d="M9 7H6a3 3 0 0 0 0 6h3"/><path d="M15 7h3a3 3 0 0 1 0 6h-3"/><path d="m8 18 8-12"/></>,
-  devtools: <><path d="M14 5h5v5"/><path d="m19 5-8 8"/><path d="M18 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></>,
-  folder: <><path d="M3 6h7l2 2h9v10H3Z"/><path d="M3 9h18"/></>,
-  play: <path d="m8 5 10 7-10 7Z"/>,
-  record: <circle cx="12" cy="12" r="6"/>,
-  refresh: <><path d="M20 11a8 8 0 0 0-14.9-4"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.9 4"/><path d="M20 20v-5h-5"/></>,
-  reload: <><path d="m13 3-5 9h4l-1 9 5-10h-4Z"/></>,
-  restart: <><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></>,
-  settings: <><circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.2-2.1-1.8.9-1.7-.7-.7-2H8l-.7 2-1.7.7-1.8-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.8-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.8.9 2.2-2.1-.9-1.9.7-1.7Z"/></>,
-  stop: <rect x="6" y="6" width="12" height="12" rx="1.5"/>,
-  video: <><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3Z"/></>,
+const ICON_NAMES: Record<IconName, UI.IconProps["name"]> = {
+  camera: "camera",
+  close: "x",
+  copy: "copy",
+  detach: "unlink",
+  devtools: "external-link",
+  folder: "folder-open",
+  play: "play",
+  record: "circle",
+  refresh: "refresh",
+  reload: "zap",
+  restart: "rotate-ccw",
+  settings: "settings",
+  stop: "square",
+  video: "video",
 };
 
 function Icon({ name }: { name: IconName }): React.ReactElement {
-  return <svg className="ft-svg" viewBox="0 0 24 24" aria-hidden="true">{ICON_PATHS[name]}</svg>;
+  return <UI.Icon className="ft-svg" name={ICON_NAMES[name]}/>;
 }
 
 function IconButton({ icon, label, onClick, disabled, tone, active }: { icon: IconName; label: string; onClick: () => void; disabled?: boolean; tone?: "primary" | "danger"; active?: boolean }): React.ReactElement {
-  return <button type="button" className={["ft-btn", "ft-icon", tone ?? "", active ? "active" : ""].filter(Boolean).join(" ")} title={label} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon}/></button>;
+  return <UI.IconButton type="button" size="xs" icon={ICON_NAMES[icon]} className={["ft-btn", "ft-icon", tone ?? "", active ? "active" : ""].filter(Boolean).join(" ")} aria-label={label} pressed={active} disabled={disabled} onClick={onClick}/>;
 }
 
 function useStyles(): void {
@@ -56,7 +57,6 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   const [showLaunchParameters, setShowLaunchParameters] = useState(false);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MediaItem | null>(null);
-  const [clock, setClock] = useState(Date.now());
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [restartConfirmationOpen, setRestartConfirmationOpen] = useState(false);
   const consoleRef = useRef<HTMLDivElement>(null);
@@ -131,13 +131,6 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [showLaunchParameters, saveLaunchParameters.loading]);
-  useEffect(() => {
-    if (!snapshot?.recording.startedAt || !["recording", "stopping"].includes(snapshot.recording.state)) return;
-    setClock(Date.now());
-    const timer = setInterval(() => setClock(Date.now()), 1_000);
-    return () => clearInterval(timer);
-  }, [snapshot?.recording.startedAt, snapshot?.recording.state]);
-
   const records = useMemo(() => { const all = snapshot?.console ?? []; const filtered = query ? all.filter((line) => `${line.stream} ${line.text}`.toLowerCase().includes(query.toLowerCase())) : all; return filtered.slice(-MAX_RENDERED_LINES); }, [snapshot?.console, query]);
   const run = snapshot?.run;
   const running = run?.state === "running";
@@ -152,6 +145,7 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   const canReinstall = Boolean(canHotRestart && snapshot?.binding.flutterProjectPath && selectedDevice && supportsAppReinstall(selectedDevice));
   const visibleMedia = (snapshot?.media ?? []).filter((item) => item.deviceId === snapshot?.selectedDeviceId);
   const recording = snapshot?.recording;
+  const clock = useNow({ intervalMs: recording?.startedAt && ["recording", "stopping"].includes(recording.state) ? 1_000 : 0 });
   const recordingBusy = startRecording.loading || stopRecording.loading;
   const recordingLive = Boolean(recording && ["starting", "recording", "stopping", "finalizing"].includes(recording.state));
   const ownsRecording = recording?.ownedByPanel !== false;
