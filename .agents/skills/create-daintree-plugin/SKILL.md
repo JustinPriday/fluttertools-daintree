@@ -1,192 +1,95 @@
 ---
 name: create-daintree-plugin
-description: Design, scaffold, implement, test, package, review, or diagnose third-party Daintree plugins. Use for plugin.json manifests, Daintree commands, panels/views, toolbar entries, settings, MCP or agent contributions, @daintreehq/plugin-sdk host APIs, renderer-worker IPC, worktree-bound panels, .dntr packaging, production installation failures, and evidence-backed plugin framework gap reports.
+description: Design, scaffold, implement, test, package, review, or diagnose third-party Daintree plugins, including project-local apps, contextual agent MCP tools, databases, settings views, tours, document packages, and Daintree compatibility migrations.
 ---
 
 # Create Daintree Plugin
 
-Build against the documented public plugin contract, validate every renderer/worker boundary, and prove the packaged plugin in production Daintree. Prefer the smallest plugin shape and the narrowest host authority that delivers the product.
+Build against the target host's public plugin contract. Choose installed or project scope deliberately, validate every worker/view/agent boundary, and verify the exact distributed artifact on the supported host versions.
 
-## Start with discovery
+Guidance `2.1.0` is source-audited against Daintree `0.41.0` and a separately pinned development snapshot. The skill-local [documentation-version.json](documentation-version.json) records both; [Documentation Version Policy](references/version-policy.md) gives feature floors and package caveats. This source audit does not claim production acceptance.
 
-1. Read the repository's `AGENTS.md` and local instructions.
-2. Inspect `plugin.json`, `package.json`, build configs, source entry points, tests, and existing `ai_docs/`.
-3. Locate the canonical `docs/plugins/`, manifest schema, SDK types, and plugin tests for the Daintree version in scope.
-4. Record the target Daintree version and whether authoring packages are published or locally linked.
-5. Separate current framework behavior from historical workarounds in existing code or notes.
+## Discover the actual target
 
-Use this source-of-truth order when facts conflict:
+1. Read the repository instructions, manifest, package/build configuration, entry points, tests, and relevant existing documentation.
+2. Record target Daintree version, release/source commit, plugin origin, host `PLUGIN_UI_VERSION`, import-map exports, and the installed authoring packages' resolved versions and exports. A matching app version string is insufficient for a development build.
+3. Compare the target schema, SDK API report, tests and production consumers with canonical `docs/plugins/`. Prefer runtime/source and schema over documentation examples when they disagree.
+4. Read [Framework Contract](references/framework-contract.md) for manifest, scope, authority and data design. Read [Panels and Transport](references/panels-and-transport.md) and [UI Kit and Icons](references/ui-kit-and-icons.md) for visual plugins; [Performance and Diagnostics](references/performance-and-diagnostics.md) for live data or measured slowness; [MCP and Agent Tooling](references/mcp-and-agent-tooling.md) for agent integrations; [Testing and Release](references/testing-and-release.md) for validation and distribution.
+5. For migrations, inventory the plugin's used APIs and manifest fields before raising its minimum version. Classify each change as required repair, optional adoption, or unavailable on the supported release.
 
-1. Target Daintree release and its runtime behavior.
-2. Manifest schema and public SDK types in that release.
-3. Daintree plugin tests and current implementation.
-4. Canonical plugin documentation in the same checkout.
-5. This skill's references and prior plugin implementations.
+`engines.daintree` is advisory from 0.38.0: an out-of-range plugin still loads with a warning. New manifest keys can still fail an older strict schema before activation, and missing APIs can still fail at runtime. Use a truthful feature-derived lower bound, conditional API use where feasible, and explicit unsupported-host diagnostics. Avoid caret ranges for Daintree 0.x: `^0.39.0` excludes 0.40.0. An upper bound is a tested support policy, not a host-enforced block.
 
-Read [Framework Contract](references/framework-contract.md) before changing a manifest or host integration.
+Published npm packages and the app are independent versions. At this audit npm latest is 0.1.0 and lacks several workspace APIs, including `/data`, `/plugin-ui`, `/view-globals`, new hooks, databases, PDF export and custom settings views. The shipped host kit is 1.0.0, independent of app 0.41.0 and package 0.1.0. New CLI lint is not in published 0.1.0. Inspect the actual installed declarations and exports. Use a matching workspace build or packed package for missing build-time support; do not assume `npm install ...@latest` supplies current source APIs. Do not silently rewrite user dependencies or release versions.
 
-## Classify the plugin
+## Select scope and plugin shape
 
-Choose one or combine only as required:
+- Installed plugin: app-wide user tool, distributed as `.dntr`. Its worker is global; active-project APIs are not bound to the project that invoked an agent tool.
+- Project plugin: `scope: "project"`, under `<projectRoot>/.daintree/plugins/<manifestId>/`, distributed with committed runtime output. It loads only in its owning project after project trust. Build locally, commit source and `dist/` together; the host never compiles or installs dependencies.
+- Command: imperative `registerAction()` from `activate()`. Installed plugins also support compiled `src/<commandId>.js`/`.mjs` convention handlers; project plugins do not.
+- Visual tool/app: panel/view plus worker, or a project-only `surfaces.emptyCanvas` claim.
+- Data app: declared `host.db` database or revision-checked files; human views and agent tools share one documented data model.
+- Terminal-agent tools: declared `agentMcp` plus `host.mcp.registerTools`; declared databases add host read-only tools. `mcpServers` is a different direction, consumed by Daintree and its in-app Assistant, never terminal agents.
+- Installed-only additions: recipes, tours, skills, agent identities, process-tool detection and app-wide contributions. Check the complete project restrictions in the framework reference.
 
-- Simple command: compiled lazy handler, no host APIs.
-- Host-aware command: manifest contribution plus `registerAction()` during activation.
-- Visual workspace: paired panel/view plus a worker main.
-- Live integration: visual workspace plus worker-owned connection and panel-targeted push events.
-- Agent tooling: MCP server or agent contribution with declared authority.
+Bind panels to durable project/worktree/resource identity using validated `initialArgs`. Use `host.pluginInfo` and `host.panelKindId(bareId)` instead of constructing instance IDs or qualified panel kinds. Renderer `pluginId` is a runtime instance identifier, not always the manifest name.
 
-Identify the durable product binding before coding: project, worktree, package root, service, device, session, or a composite identity. Do not use global active state as permanent panel identity.
+## Develop and reload
 
-If the user asks for a plan or spec, create it under the repository's documented AI-doc location before implementation. Keep host framework proposals separate from product specs.
+Keep package and manifest versions equal and unchanged during ordinary iteration.
 
-## Design the contract
+- Installed plugin: `daintree-plugin dev` validates, builds, creates the marked development symlink, and watches artifacts. A real installed directory is left untouched; uninstall it explicitly if moving to a dev link. Keep `.dev-marker` ignored.
+- Project plugin: build/watch in place, not `daintree-plugin dev`. The host watches `plugin.json` and `dist/`, not `src/`; use `doctor --offline` and verify a fresh checkout contains the build.
+- From 0.35.0, installed dev reload reconciles the whole settled artifact: manifest, contributions, worker and a fresh renderer generation. Open panels remount automatically. The old worker-only reload workaround belongs only to older hosts.
+- Production replacement install also mints a new view generation; same-version install is valid for production-path checks. Use a new plugin SemVer for an actual release or upgrade test.
+- `requestReload()` and `host.reloadPanel(panelId)` (0.38.0) remount a view, not replace its cached module or restart the worker. Report unsaved changes through the supported prop before offering reload.
+- Browser-global registrations survive generation replacement. Use retained document packages for an editor/library that requires stable class or custom-element identity; see the panel reference. Window reload resets that lifetime.
 
-Define:
+## Design the public contract
 
-- scoped plugin ID and semantic version;
-- real minimum Daintree version;
-- contributions and fully-qualified action references;
-- capabilities and filesystem/network scopes;
-- renderer and worker entry points;
-- panel `initialArgs` schema and restore rules;
-- typed request/response channels;
-- push event shapes and panel targeting;
-- ownership and teardown for every process, socket, watcher, timer, and stream;
-- expected sustained messages/bytes per second; and
-- production acceptance environment.
+Declare the minimum host, contribution IDs, action references, capabilities/scopes, runtime entries, versioned binding/state, typed channels, targeted event shapes, database schema/migrations, resource owners and teardown. Define peak stream volume and recovery behavior for a live integration.
 
-For a context-required panel, set `showInPalette: false`. Open it from a command or toolbar action that resolves current context, then dispatch `panel.openPluginPanel` with stable `initialArgs`, `worktreeId`, and an explicit `reuseExisting` policy.
+Use `showInPalette: false` for context-required panels. Resolve explicit context before dispatching `panel.openPluginPanel` with the host-qualified kind, stable `initialArgs`, owning worktree and reuse policy. Never silently retarget restored content to current foreground focus.
 
-Do not invent unsupported manifest fields. Unknown keys and invalid cross-references fail strict validation.
+Registrations and subscriptions belong in fast `activate(host)`; queries and lifetime operations can run later. Await asynchronous registrations. Defer writes, consent-gated DB opens, process spawn and expensive connection work until needed: an unanswered prompt outlasts the activation budget. Return idempotent cleanup and release resources on every failed startup path.
 
-## Implement by runtime
+Worker handlers receive `(context, args)`, actions receive `(args)`, agent tools receive `(args, caller, signal)`. Context and caller are distinct contracts. Validate inputs, results, resource ownership and revision preconditions. Use targeted `postToPanel(..., panelId)` for per-instance events; batch and sequence sustained output with bounded history and snapshot recovery. `useHostChannel` suppresses stale hook results but still sends every call; serialize ordered mutations.
 
-### Worker main
+From 0.41.0 handler invokes default to five-minute deadlines, with per-handler `timeoutMs` and 0 to opt out; args/results/push payloads cap at 4/16/1 MiB. Timeout does not interrupt work: make retries safe. Pushes batch in order but have no acknowledgement/replay or ordering against invoke replies. Subscribe then pull with revisions. Prefer synced collections for worker-owned lists, cached/selector hooks for queries, stream buffers for appended events, and shared clocks/visibility-aware animation. Listener hints may skip only recoverable production work. Bursty host subscriptions coalesce at 100 ms by default; use `debounceMs: 0` when every transition matters.
 
-- Keep `activate(host)` fast.
-- Await registrations and subscriptions during activation.
-- Use typed `registerHandler()` overloads with runtime schemas.
-- Defer heavy discovery and connections until first use.
-- Prefer audited host APIs over raw Node access.
-- Return idempotent cleanup for plugin-owned resources.
-- Retain explicit per-panel resource ownership even though worker lifetime is plugin-wide.
+Prefer host APIs and actions, then structured worker libraries, then supervised processes. `pipe` is output-only, `duplex` has writable stdin and separated stdout/stderr, `pty` merges output and supports resize. Frame protocol chunks yourself and do not assume write acknowledgement/backpressure or complete trailing output on child exit.
 
-### Renderer view
+## Views, settings and documents
 
-- Render only the panel body; Daintree owns title chrome, focus, move, maximize, context menu, and close behavior.
-- Accept and validate `PanelViewProps`, including `panelId`, `initialArgs`, and `disposeSignal` where relevant.
-- Use real controls with hover, focus, disabled, busy, and error states.
-- Ensure nested flex/scroll regions use `min-height: 0`, and test narrow and short panels.
-- Never import Daintree internals or reconstruct host chrome.
+Build controls, forms, lists, settings, overlays and feedback with host `@daintreehq/plugin-ui` first; it is a host module, not an npm runtime package. Types come from matching SDK `/plugin-ui`. Use custom token-styled content where the kit lacks the surface. Render the body; Daintree owns pane chrome. Use host semantic Tailwind utilities, container queries and `min-h-0`/`min-w-0` scroll ancestors. The host compiles and scopes utilities at runtime; do not ship another Tailwind compiler/preflight. Prefer kit `Portal`; raw portals need `styleRootAttributes` on their container. Await `whenPluginUiReady()` when testing or measuring kit output; Markdown loads separately. Use namespace imports and feature detection when supporting older facades that lack new named exports. Stock colours, `dark:`, `prose` and `@apply` are not the plugin styling contract.
 
-### Build
+Use separate Node/browser builds and `@daintreehq/plugin-vite` where a build is needed. Externalize only host-mapped React/React DOM, tour and plugin-UI specifiers; bundle SDK hooks in views. Raw ESM views can use host-served `@daintreehq/plugin-sdk/react` hooks from 0.41.0 or `window.electron.plugin`. The raw import map does not serve SDK root/files/data or arbitrary npm imports; ship relative ESM and no uncompiled JSX. Built views keep bundling their pinned SDK hooks. Zero-build workers can use the host-served SDK root, `/files` and `/data` on 0.39.0, but not `/react` or `/testing`.
 
-- Use separate browser and Node builds when the plugin has a view and a worker.
-- Use `@daintreehq/plugin-vite`.
-- Externalize all React and React DOM entry points from the renderer.
-- Emit a versioned renderer filename and keep `plugin.json` synchronized.
-- Ensure the worker's runtime dependencies are bundled or shipped.
-- Arrange a second watcher when Daintree's dev command watches only the default config.
+View icon props accept kit names, any Lucide kebab-case name, or a custom element; avoid bundling lucide-react. Manifest chrome uses generic icon IDs or bundled lowercase `./…svg` assets, not arbitrary Lucide view names. From 0.41.0 a view panel may declare up to three own-action header buttons. Use `usePanelToolbarItem` for status and `useActionRunning` for handler runs; keep resource-specific operation ownership in the worker and body fallbacks where no header setter exists.
 
-Read [Panels and Transport](references/panels-and-transport.md) for IPC, sustained output, binding, layout, and live-tail patterns.
+View ownership: `disposeSignal` ends one mount attempt, `panelRemovedSignal` ends a panel record. Use `createViewScope` (0.38.0) for adopted listeners/timers/observers/workers and asynchronous continuations; unregistered resources remain your responsibility. Worker panel sessions survive hiding/backgrounding/trashing when intended and release on lifecycle `removed` plus plugin unload. Persist panel UI through `persistState` and versioned `stateVersion`, not module globals.
 
-## Choose the correct transport
+Keep settings in their host-provided home. From 0.39.0 declare at most one `location: "settings"` view with its own ID; it has no paired panel. Mark fields `editor: "view"` to move their editor there, use `required` and `missingRequired()` for setup, and `settings.open(key?)` for navigation. Validate worker writes yourself; declaration types do not validate `settings.set` values. Secrets are declared string secret settings, never storage/DB values; a missing keychain rejects saving, and project secrets route to machine-local storage.
 
-- Use typed `useHostChannel` request/response for snapshots and user-triggered operations.
-- Every overlapping invocation is still sent; only the latest can update hook state and return its result. A superseded invocation finishes transport work but resolves to `undefined`. This is not cancellation or a streaming protocol.
-- Use `postToPanel(..., panelId)` plus a panel-targeted subscription for live events.
-- Batch sustained output by time and size, sequence batches, keep bounded renderer history, detect gaps, and provide a snapshot/reconnect path.
-- Serialize ordered mutations or queue them in the worker.
-- Never broadcast high-volume instance state and rely on local filtering.
+Use host `Markdown` from `@daintreehq/plugin-ui` (types via SDK `/plugin-ui`) for document rendering. Use `host.documents.renderPdf` for contained HTML export: fully rendered HTML, bundled/local assets, no JavaScript or network, existing destination parent, write capability/consent and bounded concurrency. Handle coded errors without retrying refused permissions from a timer.
 
-## Use host authority honestly
+## Agent tools and project targeting
 
-Prefer, in order:
+From 0.41.0 installed plugins can observe all open projects with `agents.listAll()`/`onDidChangeAllAgents()` behind `agent:read`; project plugins remain local. Handle degraded snapshots and heuristic observed states. Agent events carry optional terminal/workspace attribution. `terminals.readScreen()` separately requires `terminal:read` plus consent, returns current-screen text only, and has line/byte/rate caps. Global discovery does not widen `sendToAgent` or bind active-context APIs to an MCP caller.
 
-1. documented Daintree action or host API;
-2. structured library in the plugin worker;
-3. supervised `host.process.spawn` for noninteractive processes;
-4. direct Node APIs only when required behavior has no host path.
+Read the MCP reference before coding. Declare `mcp:expose` and one `agentMcp` endpoint, register its bounded schema-validated roster during activation, and enforce data ownership using `caller.projectId`. Caller fields are credential provenance, not proof of agent identity; there is no host-provided worktree or panel ID in this caller. Pass the cancellation signal onward and keep results compact.
 
-Do not describe capabilities as a Node sandbox. They disclose authority, influence host policy, and gate specific host APIs. Use `${project}` and `${worktree}` filesystem scope tokens when dynamic roots are appropriate; they are implemented and fail closed.
+Access is Off by default, Read only for automatic database tools, Read and write for your tools too. The MCP listener must run; supported CLI launches receive endpoints only after access is granted. Agents already launched need relaunch for a newly added server. Unchanged declared agent surfaces can keep credentials across reloads; changed capabilities/scopes/endpoint/databases/`mcpName`, other unloads or lowered access revoke them. Do not modify user-owned CLI configuration.
 
-When direct Node access is necessary, document why, scope, data flow, teardown, and user diagnostics.
+Installed-plugin databases are shared across projects, and their automatic database tools do not row-filter by caller project. If that is inappropriate, avoid declaring the shared database for automatic exposure and offer project-filtered custom tools over another store, or use project-local plugins. Merely adding filtered custom tools does not remove automatic raw database reads.
 
-## Test and package
+Explicit `host.dispatch(..., { projectId })` for an installed plugin is released in 0.41.0. It requires `project:dispatch` and the user's off-by-default Allow project targeting switch. It never opens a missing project view and does not widen action authority. A project plugin stays bound to its own project. Do not substitute foreground dispatch when explicit targeting is unavailable; see the version policy.
 
-Run, in order:
+## Validate and deliver
 
-1. typecheck and repository static checks;
-2. strict manifest validation;
-3. worker and pure renderer tests;
-4. production builds for both runtime targets;
-5. `scripts/audit_plugin.mjs <plugin-root>` from this skill;
-6. verbose packaging dry-run;
-7. archive-content inspection;
-8. installation of the exact `.dntr` in production Daintree; and
-9. lifecycle acceptance: focus, close, drag, maximize, restore, multiple panels, update, disable, and uninstall.
+Run the skill's version check against the target checkout, then the plugin's meaningful static/unit checks, strict target manifest validation, production build and supplemental `audit_plugin.mjs`. Run matching target CLI `lint` when available, reviewing its heuristics and Styles findings; report it unavailable with published 0.1.0. Inspect Performance measurements under representative load, not as proof of causation. Use current SDK `/testing` for mock-host tests and understand its omissions; it does not prove trust, consent, worker IPC, real SQLite/PDF rendering or agent reachability.
 
-Package from a clean staging directory containing only `plugin.json` and required runtime artifacts. Do not commit `.dntr` archives; publish them as release assets.
+For installed release candidates, stage runtime artifacts only, inspect a verbose packaging dry-run and the archive (including nested panel-toolbar SVGs, which the audited packager omits from its required-file check), then accept the exact `.dntr` on the minimum and newest supported production hosts. Project plugins need a fresh-checkout/trusted-project test instead of packaging. Include scope isolation, multi-panel lifecycle, settings/secrets, permissions, data conflicts, reload, agent discovery/call/revocation and OS-specific behavior as relevant. Never claim production acceptance from unit tests or source review.
 
-Read [Testing and Release](references/testing-and-release.md) before claiming release readiness.
+Run only user-authorized Daintree E2E specs or buckets. Do not change host implementation just to make a plugin work unless the user asks for that host change. This task's authorization may explicitly include host work; the skill adds no approval gate of its own.
 
-## Diagnose before patching
-
-For production failures, capture:
-
-- Daintree and plugin versions;
-- exact manifest and built entry paths;
-- renderer error and component stack;
-- worker activation/log output;
-- archive file list;
-- whether dev mode and production differ;
-- whether a clean restart, panel close/reopen, or Force Reload changes the result; and
-- a generic reproduction that does not depend on private archives.
-
-Common diagnoses:
-
-- React export or `process is not defined`: renderer bundled React incorrectly.
-- Old view after reinstall: unchanged module URL; version the view filename.
-- Wrong worktree in multi-project use: global active state was treated as visible context.
-- Cross-panel stream data: push events were not targeted by panel ID.
-- Live-tail drift on resize: layout scroll was mistaken for user intent.
-- Command visible but inert: no compiled lazy handler or imperative registration.
-
-Use Force Reload as a diagnostic/recovery control, not as the intended upgrade flow.
-
-## Handle framework boundaries
-
-Read [Known Boundaries](references/known-boundaries.md) before proposing host changes.
-
-Do not edit Daintree unless the user explicitly asks. Explore the documented route first. If it cannot meet the measured requirement, prepare a focused report containing:
-
-- desired behavior and user value;
-- documented API attempted;
-- minimal generic reproduction;
-- measured workload/lifecycle requirements;
-- practical result;
-- smallest public host portal that would unblock the plugin; and
-- why a plugin-side workaround would be unsafe, private, or misleading.
-
-Correct factual claims against the target release. In particular:
-
-- `${worktree}` filesystem authority already exists;
-- `useHostChannel` sends all calls but suppresses stale hook state;
-- do not turn a current process cap into a promised API constant;
-- icon validation already reports supported IDs;
-- Daintree 0.28 supplies standard plugin panel chrome/focus; and
-- resolved historical archive and React bugs are compatibility history, not current missing-framework items.
-
-## Definition of done
-
-The work is complete only when:
-
-- the smallest viable documented contract is implemented;
-- manifest, package, and built paths agree;
-- runtime inputs and IPC outputs are validated;
-- resource ownership and cleanup are deterministic;
-- contextual panels restore to the same durable target;
-- live data is targeted, bounded, and recoverable;
-- UI survives normal panel lifecycle and resize;
-- the clean archive contains only runtime artifacts; and
-- the exact release artifact passes production Daintree acceptance.
+For host gaps, read [Known Boundaries](references/known-boundaries.md), try the supported portal, trace its consumer, and report a generic reproduction, measured requirement, source evidence and smallest needed host addition. Keep framework gaps separate from plugin product specs; put requested audit/spec documentation in the project's prescribed AI-doc folder.
