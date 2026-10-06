@@ -1,6 +1,6 @@
 # Documentation Version Policy
 
-Read the skill-local `../documentation-version.json`. Guidance 2.1.0 pins released Daintree 0.41.0 to `v0.41.0` at `90032dbe231f0f73d283ebb3655f5dd95d549e92`, and separately records audited development source `f12266eaef7afdc270c56c15e128104744946001`. These two commits have identical tracked trees. The host UI kit contract is 1.0.0. The local merge commit and package version do not replace either evidence pin.
+Read the skill-local `../documentation-version.json`. Guidance 2.1.1 pins released Daintree 0.41.0 to `v0.41.0` at `90032dbe231f0f73d283ebb3655f5dd95d549e92`, and separately records audited development source `f12266eaef7afdc270c56c15e128104744946001`. These two commits have identical tracked trees. The host UI kit contract is 1.0.0. The local merge commit and package version do not replace either evidence pin.
 
 ## Feature floors
 

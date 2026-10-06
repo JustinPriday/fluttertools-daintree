@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 
 const auditor = fileURLToPath(new URL("./audit_plugin.mjs", import.meta.url));
 const checker = fileURLToPath(new URL("./check_guidance_version.mjs", import.meta.url));
+const hostRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 
 async function fixture(t) {
   const dir = await mkdtemp(path.join(tmpdir(), "daintree-guidance-"));
@@ -201,4 +202,28 @@ test("SDK type entries requested in tsconfig are inspected", async (t) => {
   const r = f.run("--sdk-root", sdk);
   assert.equal(r.code, 0, r.output);
   assert.match(r.output, /lacks .\/view-globals/);
+});
+
+test("invented host variables with dark fallbacks are rejected against the actual target", async (t) => {
+  const f = await fixture(t);
+  await writeFile(
+    path.join(f.dir, "dist/panel.mjs"),
+    "import React from 'react'; const css = 'background:var(--theme-bg-primary,#11161b); border-color:var(--theme-border,#667);';"
+  );
+  const r = f.run("--host-root", hostRoot);
+  assert.equal(r.code, 1, r.output);
+  assert.match(r.output, /Unknown host CSS token --theme-bg-primary/);
+  assert.match(r.output, /Unknown host CSS token --theme-border/);
+});
+
+test("documented surface and terminal tokens pass target-token inspection", async (t) => {
+  const f = await fixture(t);
+  await writeFile(
+    path.join(f.dir, "dist/panel.mjs"),
+    "import React from 'react'; const css = 'background:var(--theme-surface-panel); color:var(--theme-text-primary); border-color:var(--color-border-default); --log-bg:var(--theme-terminal-background);';"
+  );
+  const r = f.run("--host-root", hostRoot);
+  assert.equal(r.code, 0, r.output);
+  assert.match(r.output, /Checked 4 literal CSS token reference/);
+  assert.doesNotMatch(r.output, /Unknown host CSS token/);
 });
