@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { panelStyles } from "./panelStyles.js";
 
 describe("Flutter Tools panel layout policy", () => {
+  it("uses Daintree workbench and terminal roles without private dark-theme aliases", () => {
+    for (const unknownToken of ["--theme-bg-primary", "--theme-bg-secondary", "--theme-bg-tertiary", "--theme-text-tertiary"]) {
+      expect(panelStyles).not.toContain(unknownToken);
+    }
+    expect(panelStyles).not.toMatch(/var\(--theme-border(?:[,)]|$)/);
+    expect(panelStyles).toContain("background:var(--theme-surface-panel)");
+    expect(panelStyles).toContain("background:var(--theme-surface-toolbar)");
+    expect(panelStyles).toContain("background:var(--theme-terminal-background,var(--theme-surface-inset))");
+    expect(panelStyles).toContain("color:var(--theme-terminal-foreground,var(--theme-text-primary))");
+    expect(panelStyles).not.toMatch(/#[0-9a-f]{3,8}/i);
+  });
+
   it("keeps fixed controls from starving the console in short panels", () => {
     expect(panelStyles).toContain(".ft-repo-bar,.ft-launch-bar,.ft-session-bar{display:flex;min-width:0;flex:0 0 auto");
     expect(panelStyles).toContain(".ft-main{display:flex;width:100%;min-width:0;min-height:0;flex:1 1 0;height:0");

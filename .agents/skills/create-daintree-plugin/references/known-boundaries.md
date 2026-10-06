@@ -20,6 +20,8 @@ Audited against released Daintree 0.41.0 and the separately pinned development s
 
 The audited CLI packager checks top-level SVG refs but omits nested panel-toolbar refs from its required-file check. Validate those icons and explicitly inspect the archive; use the supplemental auditor with --archive-files when a file list is available.
 
+Existing public CSS surface/text/border/overlay/activity tokens cover ordinary workbench chrome. CSS vocabulary is broader than the kit's JavaScript theme-token map; consult both before claiming a missing token. Missing API keys do not make the CSS token unavailable. Report a host gap only after a correct-role minimal reproduction fails on the target; unknown names or fixed-palette fallbacks are plugin defects.
+
 ## Resolved historical boundaries
 
 The original guidance's “worker-only dev reload”, “no contextual worker tools” and “plaintext secret fallback” are no longer current. Full artifact reload shipped 0.35.0; contextual agentMcp 0.37.0; schema enforcement, view cleanup/remount and refused plaintext secrets 0.38.0; DB tools/settings/PDF/tours/expanded agent wiring 0.39.0. Keep old behavior only in explicit compatibility sections.

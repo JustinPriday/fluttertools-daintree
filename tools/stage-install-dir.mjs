@@ -14,6 +14,7 @@ const outputDir = path.join(
 
 await rm(outputDir, { recursive: true, force: true });
 await mkdir(path.join(outputDir, "dist"), { recursive: true });
+await mkdir(path.join(outputDir, "icons"), { recursive: true });
 await copyFile(path.join(projectRoot, "plugin.json"), path.join(outputDir, "plugin.json"));
 await Promise.all(
   legalFiles.map((entry) =>
@@ -27,6 +28,15 @@ const runtimeBundles = (await readdir(path.join(projectRoot, "dist"))).filter((e
 await Promise.all(
   runtimeBundles.map((entry) =>
     copyFile(path.join(projectRoot, "dist", entry), path.join(outputDir, "dist", entry))
+  )
+);
+
+const icons = (await readdir(path.join(projectRoot, "icons"))).filter((entry) =>
+  entry.endsWith(".svg")
+);
+await Promise.all(
+  icons.map((entry) =>
+    copyFile(path.join(projectRoot, "icons", entry), path.join(outputDir, "icons", entry))
   )
 );
 

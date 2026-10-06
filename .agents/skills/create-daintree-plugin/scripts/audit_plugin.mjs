@@ -9,9 +9,9 @@ const root = path.resolve(process.argv[2] ?? process.cwd());
 const options = new Map();
 for (let i = 3; i < process.argv.length; i += 2) {
   const key = process.argv[i];
-  if (!["--archive-files", "--sdk-root"].includes(key) || !process.argv[i + 1]) {
+  if (!["--archive-files", "--sdk-root", "--host-root"].includes(key) || !process.argv[i + 1]) {
     throw new Error(
-      "Usage: audit_plugin.mjs <plugin-root> [--archive-files <json>] [--sdk-root <sdk-directory>]"
+      "Usage: audit_plugin.mjs <plugin-root> [--archive-files <json>] [--sdk-root <sdk-directory>] [--host-root <daintree-directory>]"
     );
   }
   options.set(key, process.argv[i + 1]);
@@ -327,6 +327,43 @@ async function inspectSdk(sources) {
   }
 }
 
+async function inspectThemeTokens(sources) {
+  if (!options.has("--host-root")) return;
+  const hostRoot = path.resolve(options.get("--host-root"));
+  try {
+    const contract = await readFile(path.join(hostRoot, "src/styles/design-contract.css"), "utf8");
+    const model = await readFile(path.join(hostRoot, "shared/theme/types.ts"), "utf8");
+    const keysBlock = model.match(
+      /export const APP_THEME_TOKEN_KEYS\s*=\s*\[([\s\S]*?)\]\s*as const/
+    );
+    if (!keysBlock)
+      throw new Error(
+        "Cannot read target APP_THEME_TOKEN_KEYS; inspect the target token contract manually"
+      );
+    const known = new Set(
+      [...contract.matchAll(/--(?:theme|color)-[a-z0-9-]+/g)].map((match) => match[0])
+    );
+    for (const match of keysBlock[1].matchAll(/["']([a-z0-9-]+)["']/g))
+      known.add(`--theme-${match[1]}`);
+    const used = new Set(
+      sources.flatMap((source) =>
+        [...source.matchAll(/var\(\s*(--(?:theme|color)-[a-z0-9-]+)/g)].map((match) => match[1])
+      )
+    );
+    for (const token of used) {
+      if (!known.has(token))
+        fail(
+          `Unknown host CSS token ${token}: absent from target design contract/token model; a literal fallback can conceal theme-switch failure`
+        );
+    }
+    pass(
+      `Checked ${used.size} literal CSS token reference(s) against ${hostRoot}; dynamic references, token roles and runtime contrast still need review`
+    );
+  } catch (error) {
+    fail(`Cannot inspect target theme token contract: ${error.message}`);
+  }
+}
+
 async function walk(directory) {
   const output = [];
   let entries;
@@ -565,7 +602,10 @@ if (manifest) {
     } catch {}
   }
   for (const sourceFile of await walk(path.join(root, "src"))) {
-    if (/\.(?:[cm]?[jt]sx?)$/.test(sourceFile) && (await stat(sourceFile)).size <= 2 * 1024 * 1024)
+    if (
+      /\.(?:[cm]?[jt]sx?|css)$/.test(sourceFile) &&
+      (await stat(sourceFile)).size <= 2 * 1024 * 1024
+    )
       sources.push(await readFile(sourceFile, "utf8"));
   }
   for (const viewFile of viewFiles) {
@@ -584,6 +624,7 @@ if (manifest) {
       if (forbidden.pattern.test(source)) fail(`View '${viewFile.id}' contains ${forbidden.label}`);
     }
   }
+  await inspectThemeTokens(sources);
   await inspectSdk(sources);
 }
 

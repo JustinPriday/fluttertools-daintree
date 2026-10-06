@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { PanelViewProps } from "@daintreehq/plugin-sdk";
-import { useHostChannel, usePluginPanelEvent } from "@daintreehq/plugin-sdk/react";
+import { useHostChannel, useNow, usePluginPanelEvent } from "@daintreehq/plugin-sdk/react";
+import * as UI from "@daintreehq/plugin-ui";
 import { supportsAppReinstall } from "./flutter/device.js";
 import { LaunchParametersEditor } from "./launchParameters.react.js";
 import { formatDuration, recordingControl } from "./media/presentation.js";
@@ -13,29 +14,29 @@ interface ScreenshotPreview { dataUrl: string; copied: boolean }
 interface OperationResponse { ok: boolean; message: string }
 const MAX_RENDERED_LINES = 1_200;
 
-const ICON_PATHS: Record<IconName, React.ReactNode> = {
-  camera: <><path d="M4 8h3l1.5-2h7L17 8h3v11H4Z"/><circle cx="12" cy="13" r="3.5"/></>,
-  close: <><path d="m7 7 10 10"/><path d="M17 7 7 17"/></>,
-  copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
-  detach: <><path d="M9 7H6a3 3 0 0 0 0 6h3"/><path d="M15 7h3a3 3 0 0 1 0 6h-3"/><path d="m8 18 8-12"/></>,
-  devtools: <><path d="M14 5h5v5"/><path d="m19 5-8 8"/><path d="M18 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></>,
-  folder: <><path d="M3 6h7l2 2h9v10H3Z"/><path d="M3 9h18"/></>,
-  play: <path d="m8 5 10 7-10 7Z"/>,
-  record: <circle cx="12" cy="12" r="6"/>,
-  refresh: <><path d="M20 11a8 8 0 0 0-14.9-4"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.9 4"/><path d="M20 20v-5h-5"/></>,
-  reload: <><path d="m13 3-5 9h4l-1 9 5-10h-4Z"/></>,
-  restart: <><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></>,
-  settings: <><circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.2-2.1-1.8.9-1.7-.7-.7-2H8l-.7 2-1.7.7-1.8-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.8-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.8.9 2.2-2.1-.9-1.9.7-1.7Z"/></>,
-  stop: <rect x="6" y="6" width="12" height="12" rx="1.5"/>,
-  video: <><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3Z"/></>,
+const ICON_NAMES: Record<IconName, UI.IconProps["name"]> = {
+  camera: "camera",
+  close: "x",
+  copy: "copy",
+  detach: "unlink",
+  devtools: "external-link",
+  folder: "folder-open",
+  play: "play",
+  record: "circle",
+  refresh: "refresh",
+  reload: "zap",
+  restart: "rotate-ccw",
+  settings: "settings",
+  stop: "square",
+  video: "video",
 };
 
 function Icon({ name }: { name: IconName }): React.ReactElement {
-  return <svg className="ft-svg" viewBox="0 0 24 24" aria-hidden="true">{ICON_PATHS[name]}</svg>;
+  return <UI.Icon className="ft-svg" name={ICON_NAMES[name]}/>;
 }
 
 function IconButton({ icon, label, onClick, disabled, tone, active }: { icon: IconName; label: string; onClick: () => void; disabled?: boolean; tone?: "primary" | "danger"; active?: boolean }): React.ReactElement {
-  return <button type="button" className={["ft-btn", "ft-icon", tone ?? "", active ? "active" : ""].filter(Boolean).join(" ")} title={label} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick}><Icon name={icon}/></button>;
+  return <UI.IconButton type="button" size="xs" icon={ICON_NAMES[icon]} variant={tone === "danger" ? "ghost-danger" : active || tone === "primary" ? "subtle" : "ghost"} aria-label={label} pressed={active} disabled={disabled} onClick={onClick}/>;
 }
 
 function useStyles(): void {
@@ -56,7 +57,6 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   const [showLaunchParameters, setShowLaunchParameters] = useState(false);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MediaItem | null>(null);
-  const [clock, setClock] = useState(Date.now());
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [restartConfirmationOpen, setRestartConfirmationOpen] = useState(false);
   const consoleRef = useRef<HTMLDivElement>(null);
@@ -110,34 +110,9 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
     return () => { document.removeEventListener("pointerdown", closeOutside); document.removeEventListener("keydown", closeOnEscape); };
   }, [runMenuOpen]);
   useEffect(() => {
-    if (!restartConfirmationOpen) return;
-    const closeOutside = (event: PointerEvent): void => { if (!restartActionRef.current?.contains(event.target as Node)) setRestartConfirmationOpen(false); };
-    const closeOnEscape = (event: KeyboardEvent): void => { if (event.key === "Escape") setRestartConfirmationOpen(false); };
-    document.addEventListener("pointerdown", closeOutside);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => { document.removeEventListener("pointerdown", closeOutside); document.removeEventListener("keydown", closeOnEscape); };
-  }, [restartConfirmationOpen]);
-  useEffect(() => () => { if (runHoldTimer.current) clearTimeout(runHoldTimer.current); if (restartHoldTimer.current) clearTimeout(restartHoldTimer.current); }, []);
+    return () => { if (runHoldTimer.current) clearTimeout(runHoldTimer.current); if (restartHoldTimer.current) clearTimeout(restartHoldTimer.current); };
+  }, []);
   useEffect(() => { setRunMenuOpen(false); setRestartConfirmationOpen(false); }, [snapshot?.selectedDeviceId]);
-  useEffect(() => {
-    if (!pendingDelete) return;
-    const closeOnEscape = (event: KeyboardEvent): void => { if (event.key === "Escape") setPendingDelete(null); };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [pendingDelete]);
-  useEffect(() => {
-    if (!showLaunchParameters) return;
-    const closeOnEscape = (event: KeyboardEvent): void => { if (event.key === "Escape" && !saveLaunchParameters.loading) setShowLaunchParameters(false); };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [showLaunchParameters, saveLaunchParameters.loading]);
-  useEffect(() => {
-    if (!snapshot?.recording.startedAt || !["recording", "stopping"].includes(snapshot.recording.state)) return;
-    setClock(Date.now());
-    const timer = setInterval(() => setClock(Date.now()), 1_000);
-    return () => clearInterval(timer);
-  }, [snapshot?.recording.startedAt, snapshot?.recording.state]);
-
   const records = useMemo(() => { const all = snapshot?.console ?? []; const filtered = query ? all.filter((line) => `${line.stream} ${line.text}`.toLowerCase().includes(query.toLowerCase())) : all; return filtered.slice(-MAX_RENDERED_LINES); }, [snapshot?.console, query]);
   const run = snapshot?.run;
   const running = run?.state === "running";
@@ -152,6 +127,7 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   const canReinstall = Boolean(canHotRestart && snapshot?.binding.flutterProjectPath && selectedDevice && supportsAppReinstall(selectedDevice));
   const visibleMedia = (snapshot?.media ?? []).filter((item) => item.deviceId === snapshot?.selectedDeviceId);
   const recording = snapshot?.recording;
+  const clock = useNow({ intervalMs: recording?.startedAt && ["recording", "stopping"].includes(recording.state) ? 1_000 : 0 });
   const recordingBusy = startRecording.loading || stopRecording.loading;
   const recordingLive = Boolean(recording && ["starting", "recording", "stopping", "finalizing"].includes(recording.state));
   const ownsRecording = recording?.ownedByPanel !== false;
@@ -249,34 +225,24 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   };
 
   return <div className="ft-root">
-    <header className="ft-repo-bar">
-      <div className="ft-mark">F</div>
-      <div className="ft-context"><strong>{snapshot?.binding.worktreeName ?? "Flutter Tools"}</strong><span title={snapshot?.binding.worktreePath}>{snapshot?.binding.worktreePath ?? "Binding to visible worktree…"}</span></div>
-      <div className="ft-project-chip" title={snapshot?.binding.flutterProjectPath ?? "No Flutter project selected"}><span>PROJECT</span>{selectedProject?.relativePath ?? (snapshot?.binding.flutterProjectPath ? "Flutter app" : "Not set")}</div>
-      <IconButton icon="settings" label="Flutter Tools settings" active={showSettings} onClick={() => setShowSettings((value) => !value)}/>
-    </header>
+    <UI.PaneHeader className="ft-context-header" icon="monitor-play" title={snapshot?.binding.worktreeName ?? "Flutter Tools"} subtitle={<span title={snapshot?.binding.worktreePath}>{selectedProject?.relativePath ? `${selectedProject.relativePath} · ` : ""}{snapshot?.binding.worktreePath ?? "Binding to visible worktree…"}</span>} actions={<UI.Toolbar aria-label="Flutter Tools configuration"><UI.ToolbarButton icon="settings" aria-label="Flutter Tools configuration" pressed={showSettings} onClick={() => setShowSettings((value) => !value)}/></UI.Toolbar>}/>
     {showSettings ? <section className="ft-settings" aria-label="Flutter project settings">
       <div className="ft-settings-copy"><strong>Flutter project</strong><span>Set once for this panel. Nested apps remain bound to the current Daintree worktree.</span></div>
-      <select className="ft-select ft-project-select" aria-label="Flutter project" value={snapshot?.binding.flutterProjectPath ?? ""} disabled={!snapshot || anyActive || selectProject.loading} onChange={(event) => void changeProject(event.target.value)}>
-        <option value="">Select project…</option>{snapshot?.projects.map((project) => <option key={project.path} value={project.path}>{project.relativePath === "." ? project.name : `${project.name} · ${project.relativePath}`}</option>)}
-      </select>
+      <UI.Select className="ft-project-select" aria-label="Flutter project" density="compact" value={snapshot?.binding.flutterProjectPath ?? ""} placeholder="Select project…" disabled={!snapshot || anyActive || selectProject.loading} onValueChange={(value) => void changeProject(value)} options={(snapshot?.projects ?? []).map((project) => ({ value: project.path, label: project.relativePath === "." ? project.name : `${project.name} · ${project.relativePath}`, description: project.path }))}/>
       {anyActive ? <span className="ft-settings-note">Stop all apps to change project.</span> : null}
       <button type="button" className={`ft-params-summary-btn ${enabledParameterCount ? "active" : ""}`} disabled={!snapshot?.binding.flutterProjectPath} onClick={() => setShowLaunchParameters(true)}>
         <span className="ft-param-mark" aria-hidden="true">&#123; &#125;</span><span><strong>Launch parameters</strong><small>{savedParameterCount ? `${enabledParameterCount} set · ${savedParameterCount} saved` : "Default Flutter launch"}</small></span><b>Edit</b>
       </button>
-      <button type="button" className="ft-btn ft-text-btn ft-plugin-settings-btn" title="Open Plugin Settings" aria-label="Open Plugin Settings" disabled={openSettings.loading} onClick={() => void openSettings.invoke(baseArgs)}>{openSettings.loading ? "Opening…" : "Plugin Settings"}</button>
+      <UI.Button type="button" size="xs" variant="secondary" icon="settings" className="ft-plugin-settings-btn" loading={openSettings.loading} disabled={openSettings.loading} onClick={() => void openSettings.invoke(baseArgs)}>Plugin settings</UI.Button>
     </section> : null}
     <div className="ft-launch-bar">
-      <label className="ft-device-picker"><span>Target</span><select className="ft-select" aria-label="Flutter target device" value={snapshot?.selectedDeviceId ?? ""} disabled={!snapshot || !snapshot.devices.length || busy} onChange={(event) => void changeDevice(event.target.value)}>
-        {!snapshot?.devices.length ? <option value="">No devices detected</option> : null}
-        {snapshot?.devices.map((device) => { const session = snapshot.sessions.find((item) => item.deviceId === device.id); const state = session?.state ?? "idle"; const mode = session?.mode; const live = ["starting", "running", "reloading", "restarting", "stopping"].includes(state); return <option key={device.id} value={device.id}>{live ? "● " : ""}{device.name} · {device.platform}{device.emulator ? " · emulator" : ""}{state !== "idle" ? ` · ${state}` : ""}{live && mode && mode !== "debug" ? ` · ${mode}` : ""}</option>; })}
-      </select></label>
+      <label className="ft-device-picker"><span>Target</span><UI.Select className="ft-device-select" aria-label="Flutter target device" density="compact" value={snapshot?.selectedDeviceId ?? ""} placeholder={snapshot?.devices.length ? "Select target…" : "No devices detected"} disabled={!snapshot || !snapshot.devices.length || busy} onValueChange={(value) => void changeDevice(value)} options={(snapshot?.devices ?? []).map((device) => { const session = snapshot?.sessions.find((item) => item.deviceId === device.id); const state = session?.state ?? "idle"; const mode = session?.mode; const live = ["starting", "running", "reloading", "restarting", "stopping"].includes(state); return { value: device.id, label: `${live ? "● " : ""}${device.name}`, description: `${device.platform}${device.emulator ? " · emulator" : ""}${state !== "idle" ? ` · ${state}` : ""}${live && mode && mode !== "debug" ? ` · ${mode}` : ""}` }; })}/></label>
       <span className="ft-device-count">{snapshot?.devices.length ?? 0} available</span>
-      {savedParameterCount ? <button type="button" className={`ft-param-chip ${enabledParameterCount ? "active" : ""}`} title={`${enabledParameterCount} set · ${savedParameterCount} saved launch ${savedParameterCount === 1 ? "parameter" : "parameters"}`} aria-label={`Edit launch parameters. ${enabledParameterCount} set, ${savedParameterCount} saved.`} onClick={() => setShowLaunchParameters(true)}><i/><span>PARAMS</span><strong>{enabledParameterCount}</strong></button> : null}<span className="ft-spacer"/>
+      {savedParameterCount ? <UI.Button type="button" size="xs" variant={enabledParameterCount ? "subtle" : "ghost"} icon="braces" className="ft-param-chip" title={`${enabledParameterCount} set · ${savedParameterCount} saved launch ${savedParameterCount === 1 ? "parameter" : "parameters"}`} aria-label={`Edit launch parameters. ${enabledParameterCount} set, ${savedParameterCount} saved.`} onClick={() => setShowLaunchParameters(true)}>Params <UI.Badge size="xs" tone={enabledParameterCount ? "info" : "neutral"}>{enabledParameterCount}</UI.Badge></UI.Button> : null}<span className="ft-spacer"/>
       <IconButton icon="refresh" label="Refresh projects and devices" disabled={busy} onClick={() => void refreshWorkspace()}/>
       {active && selectedDevice ? <IconButton icon="stop" label={`Stop Flutter application on ${selectedDevice.name}`} tone="danger" disabled={busy || run?.state === "stopping"} onClick={() => void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "stop" })}/>
       : <div ref={runActionRef} className="ft-run-action">
-        <button type="button" className="ft-btn ft-icon primary" title={selectedDevice ? `Run debug build on ${selectedDevice.name}. Hold or right-click for release.` : "Select a target to run"} aria-label={selectedDevice ? `Run debug build on ${selectedDevice.name}. Hold or right-click for release options.` : "Select a target to run"} aria-haspopup="menu" aria-expanded={runMenuOpen} disabled={!canStart || busy || !selectedDevice} onPointerDown={beginRunHold} onPointerUp={cancelRunHold} onPointerCancel={cancelRunHold} onPointerLeave={cancelRunHold} onContextMenu={(event) => { event.preventDefault(); openRunMenu(); }} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); openRunMenu(); } }} onClick={runDebug}><Icon name="play"/></button>
+        <UI.IconButton type="button" size="sm" variant="outline" icon="play" tooltip={selectedDevice ? `Run debug build on ${selectedDevice.name}. Hold or right-click for release.` : "Select a target to run"} aria-label={selectedDevice ? `Run debug build on ${selectedDevice.name}. Hold or right-click for release options.` : "Select a target to run"} aria-haspopup="menu" aria-expanded={runMenuOpen} disabled={!canStart || busy || !selectedDevice} onPointerDown={beginRunHold} onPointerUp={cancelRunHold} onPointerCancel={cancelRunHold} onPointerLeave={cancelRunHold} onContextMenu={(event) => { event.preventDefault(); openRunMenu(); }} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); openRunMenu(); } }} onClick={runDebug}/>
         {runMenuOpen ? <div className="ft-run-popover" role="menu" aria-label="Flutter launch modes">
           <span>ALTERNATE LAUNCH</span>
           <button type="button" className="ft-run-option" role="menuitem" autoFocus onClick={() => launch("release")}>
@@ -291,47 +257,38 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
       {run?.appId ? <span className="ft-app-id" title={run.appId}>{run.appId}</span> : null}<span className="ft-spacer"/>
       <IconButton icon="reload" label={run?.mode === "release" ? "Hot reload is unavailable for release builds" : "Hot reload"} disabled={!running || !debugSession || !selectedDevice?.capabilities.hotReload || busy} onClick={() => selectedDevice && void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "hotReload" })}/>
       <div ref={restartActionRef} className="ft-restart-action">
-        <button type="button" className="ft-btn ft-icon" title="Hot restart" aria-label="Hot restart" disabled={!canHotRestart || busy} onPointerDown={beginRestartHold} onPointerUp={cancelRestartHold} onPointerCancel={cancelRestartHold} onPointerLeave={cancelRestartHold} onClick={hotRestart}><Icon name="restart"/></button>
-        {restartConfirmationOpen ? <div className="ft-restart-popover ft-restart-confirm" role="dialog" aria-modal="true" aria-label="Confirm reinstall and restart">
-          <strong>Reinstall the app on {selectedDevice?.name} from scratch?</strong>
-          <p><strong>All app data stored on this device will be permanently lost.</strong> Preferences, databases, caches, and signed-in state will be removed. Project source files and remote data are not affected.</p>
-          <p>The app will then be reinstalled and launched using the same Flutter run configuration.</p>
-          <div><button type="button" className="ft-btn ft-text-btn" onClick={() => setRestartConfirmationOpen(false)}>Cancel</button><button type="button" className="ft-btn danger ft-text-btn" onClick={confirmReinstall}>Delete &amp; Reinstall</button></div>
-        </div> : null}
+        <UI.IconButton type="button" size="xs" variant="ghost" icon="rotate-ccw" aria-label="Hot restart" tooltip="Hot restart. Hold to reinstall the app and delete its data." disabled={!canHotRestart || busy} onPointerDown={beginRestartHold} onPointerUp={cancelRestartHold} onPointerCancel={cancelRestartHold} onPointerLeave={cancelRestartHold} onClick={hotRestart}/>
       </div>
       <IconButton icon="devtools" label={run?.mode === "release" ? "DevTools is unavailable for release builds" : "Open Flutter DevTools"} disabled={!debugSession || !(run?.devToolsUri || run?.vmServiceUri) || busy} onClick={() => selectedDevice && void openDevTools.invoke({ ...baseArgs, deviceId: selectedDevice.id })}/>
       <div className="ft-capture-cluster" aria-label="Device media controls">
         <IconButton icon="camera" label="Capture device screenshot" disabled={!selectedDevice?.capabilities.screenshot || busy || screenshot.loading} onClick={() => void capture()}/>
-        <button type="button" className={`ft-btn ft-record-btn ${recordControl.active ? "active" : ""}`} title={recordControl.title} aria-label={recordControl.title} aria-pressed={recordControl.active} disabled={recordControl.disabled} onClick={() => void toggleRecording()}>
-          {recordControl.active ? <Icon name="stop"/> : <Icon name="record"/>}{recordControl.active ? <span>{recordControl.label}</span> : null}
-        </button>
+        {recordControl.active ? <UI.Button type="button" size="xs" variant="ghost-danger" icon="square" pressed aria-label={recordControl.title} disabled={recordControl.disabled} onClick={() => void toggleRecording()}>{recordControl.label}</UI.Button> : <UI.IconButton type="button" size="xs" variant="ghost-danger" icon="circle" aria-label={recordControl.title} disabled={recordControl.disabled} onClick={() => void toggleRecording()}/>}
       </div>
       <IconButton icon="detach" label="Detach debugger and leave application running" disabled={!running || busy} onClick={() => selectedDevice && void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "detach" })}/>
     </div>
-    {error ? <div className="ft-error" role="alert"><span>{error}</span><button className="ft-alert-close" type="button" aria-label="Dismiss error" onClick={() => setDismissedError(error)}><Icon name="close"/></button></div> : null}
-    {notice ? <div className="ft-notice" role="status"><span>{notice}</span><button className="ft-alert-close" type="button" aria-label="Dismiss success message" onClick={() => setNotice(null)}><Icon name="close"/></button></div> : null}
-    {pendingDelete ? <div className="ft-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) setPendingDelete(null); }}><div className="ft-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${pendingDelete.kind}`}>
-      <strong>Remove this {pendingDelete.kind === "recording" ? "recording" : "screenshot"}?</strong>
-      <p><strong>Remove Reference</strong> keeps the single saved file at the path below. <strong>Delete File</strong> removes the reference and permanently deletes that file.</p><code title={pendingDelete.filePath}>{pendingDelete.filePath}</code>
-      <div><button type="button" className="ft-btn ft-text-btn" autoFocus onClick={() => setPendingDelete(null)}>Cancel</button><button type="button" className="ft-btn ft-text-btn" disabled={deleteMedia.loading} onClick={() => void removeMedia(pendingDelete, false)}>Remove Reference</button><button type="button" className="ft-btn danger ft-text-btn" disabled={deleteMedia.loading} onClick={() => void removeMedia(pendingDelete, true)}>Delete File</button></div>
-    </div></div> : null}
+    <UI.ConfirmDialog open={restartConfirmationOpen} onClose={() => setRestartConfirmationOpen(false)} onConfirm={confirmReinstall} title={`Reinstall on ${selectedDevice?.name ?? "this device"}?`} description="Flutter Tools will remove the installed app and all of its local data, then install and launch it again with the same run configuration." confirmLabel="Delete data & reinstall" variant="destructive" icon="rotate-ccw" loading={reinstallRun.loading}><strong>Preferences, databases, caches, and signed-in state on the device will be permanently lost.</strong> Project source files and remote data are not affected.</UI.ConfirmDialog>
+    {error ? <UI.Callout variant="strip" size="compact" severity="error" role="alert" onDismiss={() => setDismissedError(error)} dismissLabel="Dismiss error">{error}</UI.Callout> : null}
+    {notice ? <UI.Callout variant="strip" size="compact" severity="success" role="status" onDismiss={() => setNotice(null)} dismissLabel="Dismiss notification">{notice}</UI.Callout> : null}
+    <UI.Dialog open={Boolean(pendingDelete)} onClose={() => setPendingDelete(null)} title={`Remove ${pendingDelete?.kind === "recording" ? "recording" : "screenshot"}?`} icon="trash" size="sm" dismissible={!deleteMedia.loading} footer={pendingDelete ? <><UI.Button type="button" size="sm" variant="ghost" disabled={deleteMedia.loading} onClick={() => setPendingDelete(null)}>Cancel</UI.Button><UI.Button type="button" size="sm" variant="secondary" loading={deleteMedia.loading && deletingPath === pendingDelete.filePath} disabled={deleteMedia.loading} onClick={() => void removeMedia(pendingDelete, false)}>Remove reference</UI.Button><UI.Button type="button" size="sm" variant="destructive" loading={deleteMedia.loading && deletingPath === pendingDelete.filePath} disabled={deleteMedia.loading} onClick={() => void removeMedia(pendingDelete, true)}>Delete file</UI.Button></> : null}>
+      {pendingDelete ? <div className="ft-native-dialog-copy"><p>Removing the reference keeps the saved file. Deleting the file permanently removes the single saved copy as well.</p><code title={pendingDelete.filePath}>{pendingDelete.filePath}</code></div> : null}
+    </UI.Dialog>
     {showLaunchParameters && snapshot ? <LaunchParametersEditor key={`${snapshot.binding.flutterProjectPath}:${snapshot.launchParameters.dartDefines.map((define) => `${define.key}:${define.value}:${define.enabled}`).join("|")}`} parameters={snapshot.launchParameters} projectName={selectedProject?.name ?? "Flutter project"} running={anyActive} saving={saveLaunchParameters.loading} onCancel={() => setShowLaunchParameters(false)} onSave={persistLaunchParameters}/> : null}
     <main className="ft-main">
-      <div className="ft-tabs"><button className={`ft-tab ${tab === "console" ? "active" : ""}`} onClick={() => setTab("console")}>Console <span className="ft-count">{snapshot?.console.length ?? 0}</span></button><button className={`ft-tab ${tab === "media" ? "active" : ""}`} onClick={() => setTab("media")}>Media <span className="ft-count">{visibleMedia.length}</span></button></div>
-      {tab === "console" ? <section className="ft-pane"><div className="ft-console-tools"><input className="ft-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Filter ${selectedDevice?.name ?? "target"} console…`} aria-label="Filter console output"/><button className="ft-btn ft-text-btn" disabled={!records.length} onClick={() => void copyConsole.invoke({ text: records.map((line) => `${line.at} [${line.stream}] ${line.text}`).join("\n") })}>Copy</button><button className="ft-btn ft-text-btn" disabled={!selectedDevice} onClick={() => selectedDevice && void clearConsole.invoke({ ...baseArgs, deviceId: selectedDevice.id })}>Clear</button></div><div className="ft-console-wrap"><div ref={consoleRef} className="ft-console" onWheel={() => { const node = consoleRef.current; if (node && node.scrollHeight-node.scrollTop-node.clientHeight > 24) setFollow(false); }} onScroll={() => { const node = consoleRef.current; if (node && node.scrollHeight-node.scrollTop-node.clientHeight < 8) setFollow(true); }}>
-        {!records.length ? <div className="ft-empty"><div><strong>{snapshot?.binding.flutterProjectPath ? "Console standing by" : "Choose a Flutter project"}</strong>{snapshot?.binding.flutterProjectPath ? "Run the app to stream structured Flutter output." : "Open project settings to bind one of the discovered Flutter apps."}</div></div> : records.map((line: ConsoleRecord) => <div key={line.id} className={`ft-line ${line.level}`}><span className="ft-time">{line.at.slice(11,19)}</span><span className="ft-stream">{line.stream}</span><span className="ft-text">{line.text}</span></div>)}
-      </div>{!follow ? <button className="ft-btn ft-resume" onClick={() => setFollow(true)}>↓ Resume live tail</button> : null}</div></section>
-      : <section className="ft-pane ft-media">{!visibleMedia.length ? <div className="ft-empty"><div><strong>No media for {selectedDevice?.name ?? "this target"}</strong>Capture a PNG or record an Android device to collect media here.<small>Video recording is Android-only. Files use the configured save folder, or Flutter Tools storage when no folder is set.</small></div></div> : visibleMedia.map((item) => {
+      <UI.Tabs className="ft-tabs-native" items={[{ value: "console", label: "Console", icon: "terminal", badge: snapshot?.console.length ?? 0 }, { value: "media", label: "Media", icon: "image", badge: visibleMedia.length }]} value={tab} onValueChange={(value) => setTab(value as Tab)} aria-label="Flutter Tools views" density="strip"/>
+      {tab === "console" ? <section className="ft-pane"><UI.Toolbar aria-label="Console controls" variant="bar" className="ft-console-tools"><UI.SearchField className="ft-search-native" size="dense" value={query} onValueChange={setQuery} onClear={() => setQuery("")} placeholder={`Filter ${selectedDevice?.name ?? "target"} console…`} aria-label="Filter console output"/><UI.Button type="button" size="xs" variant="ghost" icon="copy" disabled={!records.length} onClick={() => void copyConsole.invoke({ text: records.map((line) => `${line.at} [${line.stream}] ${line.text}`).join("\n") })}>Copy</UI.Button><UI.Button type="button" size="xs" variant="ghost-danger" icon="trash" disabled={!selectedDevice} onClick={() => selectedDevice && void clearConsole.invoke({ ...baseArgs, deviceId: selectedDevice.id })}>Clear</UI.Button></UI.Toolbar><div className="ft-console-wrap"><div ref={consoleRef} className="ft-console" onWheel={() => { const node = consoleRef.current; if (node && node.scrollHeight-node.scrollTop-node.clientHeight > 24) setFollow(false); }} onScroll={() => { const node = consoleRef.current; if (node && node.scrollHeight-node.scrollTop-node.clientHeight < 8) setFollow(true); }}>
+        {!records.length ? <UI.EmptyState className="ft-empty-native" title={snapshot?.binding.flutterProjectPath ? "Console standing by" : "Choose a Flutter project"} description={snapshot?.binding.flutterProjectPath ? "Run the app to stream structured Flutter output." : "Open project settings to bind one of the discovered Flutter apps."} icon="terminal" scale="canvas" action={!snapshot?.binding.flutterProjectPath ? <UI.Button type="button" size="sm" variant="secondary" icon="settings" onClick={() => setShowSettings(true)}>Choose project</UI.Button> : undefined}/> : records.map((line: ConsoleRecord) => <div key={line.id} className={`ft-line ${line.level}`}><span className="ft-time">{line.at.slice(11,19)}</span><span className="ft-stream">{line.stream}</span><span className="ft-text">{line.text}</span></div>)}
+      </div>{!follow ? <UI.Button className="ft-resume" type="button" size="xs" variant="pill" icon="arrow-down" onClick={() => setFollow(true)}>Resume live tail</UI.Button> : null}</div></section>
+      : <section className="ft-pane ft-media">{!visibleMedia.length ? <UI.EmptyState className="ft-empty-native" title={`No media for ${selectedDevice?.name ?? "this target"}`} description={<>Capture a PNG or record an Android device to collect media here.<small>Video recording is Android-only. Files use the configured save folder, or Flutter Tools storage when no folder is set.</small></>} icon="image" scale="canvas"/> : visibleMedia.map((item) => {
         const preview = previews[item.filePath]; const created = new Date(item.createdAt); const timestamp = Number.isNaN(created.valueOf()) ? item.createdAt : created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         return <article className={`ft-media-card ${item.kind}`} key={item.id}>
-          <button className="ft-shot-delete" type="button" title={`Remove ${item.kind}`} aria-label={`Remove ${item.kind} captured at ${timestamp}`} disabled={deletingPath === item.filePath || deleteMedia.loading} onClick={() => setPendingDelete(item)}><Icon name="close"/></button>
+          <UI.IconButton className="ft-shot-delete" type="button" size="xs" variant="ghost-danger" icon="x" aria-label={`Remove ${item.kind} captured at ${timestamp}`} disabled={deletingPath === item.filePath || deleteMedia.loading} onClick={() => setPendingDelete(item)}/>
           {item.kind === "screenshot" && preview?.dataUrl ? <img src={preview.dataUrl} alt={`Device screenshot captured at ${timestamp}`}/> : <div className="ft-media-placeholder" aria-label={item.kind === "recording" ? "MP4 screen recording" : "PNG screenshot"}><Icon name={item.kind === "recording" ? "video" : "camera"}/><strong>{item.kind === "recording" ? "MP4 RECORDING" : "PNG CAPTURE"}</strong>{item.durationSeconds != null ? <span>{formatDuration(item.durationSeconds)}</span> : null}</div>}
           <div className="ft-media-info"><div><strong>{item.kind === "recording" ? "Screen recording" : "Screenshot"}</strong><span title={item.filePath}>{timestamp}</span>{item.saveWarning ? <span className="warning" title={item.saveWarning}>Save-folder warning</span> : null}</div>
-            <div className="ft-media-actions">{item.kind === "screenshot" ? <IconButton icon="copy" label={preview?.copied ? "Copy screenshot again" : "Copy screenshot"} disabled={copyScreenshot.loading} onClick={() => void copyShot(item)}/> : null}<button className="ft-btn ft-text-btn" disabled={openMedia.loading} onClick={() => selectedDevice && void openMedia.invoke({ ...baseArgs, deviceId: selectedDevice.id, filePath: item.filePath })}>Open</button><IconButton icon="folder" label="Reveal media in folder" disabled={revealMedia.loading} onClick={() => selectedDevice && void revealMedia.invoke({ ...baseArgs, deviceId: selectedDevice.id, filePath: item.filePath })}/></div>
+            <div className="ft-media-actions">{item.kind === "screenshot" ? <IconButton icon="copy" label={preview?.copied ? "Copy screenshot again" : "Copy screenshot"} disabled={copyScreenshot.loading} onClick={() => void copyShot(item)}/> : null}<UI.Button type="button" size="xs" variant="contrast" disabled={openMedia.loading} onClick={() => selectedDevice && void openMedia.invoke({ ...baseArgs, deviceId: selectedDevice.id, filePath: item.filePath })}>Open</UI.Button><IconButton icon="folder" label="Reveal media in folder" disabled={revealMedia.loading} onClick={() => selectedDevice && void revealMedia.invoke({ ...baseArgs, deviceId: selectedDevice.id, filePath: item.filePath })}/></div>
           </div>
         </article>;
       })}</section>}
     </main>
-    <footer className="ft-toolchain"><span className={`ft-tool-dot ${snapshot?.sdk ? "ready" : ""}`}/><strong>Flutter</strong><span>{snapshot?.sdk?.version ?? "SDK unavailable"}</span><span className="ft-divider"/> <span>{snapshot?.sdk?.source ? snapshot.sdk.source.toUpperCase() : "UNRESOLVED"}</span><span className="ft-tool-path" title={snapshot?.sdk?.executable}>{snapshot?.sdk?.executable ?? "Flutter executable not resolved"}</span><span className="ft-spacer"/><span>{runningCount} running · {snapshot?.devices.length ?? 0} device{snapshot?.devices.length === 1 ? "" : "s"}</span></footer>
+    <UI.StatusBar className="ft-toolchain-native" left={[<span key="sdk"><UI.Badge size="xs" tone={snapshot?.sdk ? "success" : "error"}>Flutter {snapshot?.sdk?.version ?? "unavailable"}</UI.Badge></span>, <span key="source">{snapshot?.sdk?.source ? snapshot.sdk.source.toUpperCase() : "UNRESOLVED"}</span>, <span key="path" className="ft-tool-path" title={snapshot?.sdk?.executable}>{snapshot?.sdk?.executable ?? "Flutter executable not resolved"}</span>]} right={`${runningCount} running · ${snapshot?.devices.length ?? 0} device${snapshot?.devices.length === 1 ? "" : "s"}`}/>
   </div>;
 }
