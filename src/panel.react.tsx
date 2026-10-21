@@ -3,6 +3,7 @@ import type { PanelViewProps } from "@daintreehq/plugin-sdk";
 import { useHostChannel, useNow, usePluginPanelEvent } from "@daintreehq/plugin-sdk/react";
 import * as UI from "@daintreehq/plugin-ui";
 import { supportsAppReinstall } from "./flutter/device.js";
+import { AppSettingsDialog } from "./appSettings.react.js";
 import { LaunchParametersEditor } from "./launchParameters.react.js";
 import { formatDuration, recordingControl } from "./media/presentation.js";
 import { consoleBatchSchema, snapshotSchema, type ConsoleBatch, type ConsoleRecord, type FlutterWorkspaceSnapshot, type LaunchParameters, type MediaItem, type RunMode } from "./shared/contracts.js";
@@ -55,6 +56,7 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   const [follow, setFollow] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showLaunchParameters, setShowLaunchParameters] = useState(false);
+  const [showAppSettings, setShowAppSettings] = useState(false);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MediaItem | null>(null);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
@@ -89,16 +91,18 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   const copyConsole = useHostChannel<{ text: string }, unknown>(pluginId, "console.copy");
   const openDevTools = useHostChannel<{ panelId: string; initialArgs?: Record<string, unknown>; deviceId: string }, unknown>(pluginId, "devtools.open");
 
-  usePluginPanelEvent<unknown>(pluginId, "workspace.snapshot", panelId, (payload) => { const parsed = snapshotSchema.safeParse(payload); if (parsed.success) { expectedSequence.current = parsed.data.sequence; setSnapshot(parsed.data); } });
+  const acceptSnapshot = (next: FlutterWorkspaceSnapshot | null | undefined): void => { if (next) { expectedSequence.current = next.sequence; setSnapshot(next); } };
+  usePluginPanelEvent<unknown>(pluginId, "workspace.snapshot", panelId, (payload) => { const parsed = snapshotSchema.safeParse(payload); if (parsed.success) acceptSnapshot(parsed.data); });
+  usePluginPanelEvent<unknown>(pluginId, "workspace.changed", panelId, () => { void connect.invoke(baseArgs).then(acceptSnapshot); });
   usePluginPanelEvent<ConsoleBatch>(pluginId, "console.batch", panelId, (payload) => {
     const parsed = consoleBatchSchema.safeParse(payload); if (!parsed.success) return;
     if (parsed.data.deviceId !== snapshot?.selectedDeviceId) return;
-    if (parsed.data.sequence !== expectedSequence.current) void connect.invoke(baseArgs).then((next) => next && setSnapshot(next));
+    if (parsed.data.sequence !== expectedSequence.current) void connect.invoke(baseArgs).then(acceptSnapshot);
     expectedSequence.current = parsed.data.sequence + 1;
     setSnapshot((current) => current ? { ...current, console: [...current.console, ...parsed.data.records].slice(-5000), sequence: expectedSequence.current } : current);
   });
 
-  useEffect(() => { void connect.invoke(baseArgs).then((next) => next && setSnapshot(next)); }, [panelId]);
+  useEffect(() => { void connect.invoke(baseArgs).then(acceptSnapshot); }, [panelId]);
   useEffect(() => { if (!follow) return; requestAnimationFrame(() => { const node = consoleRef.current; if (node) node.scrollTop = node.scrollHeight; }); }, [snapshot?.console.length, follow]);
   useEffect(() => { if (snapshot && !snapshot.binding.flutterProjectPath && !promptedForProject.current) { promptedForProject.current = true; setShowSettings(true); } }, [snapshot]);
   useEffect(() => {
@@ -115,15 +119,22 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   useEffect(() => { setRunMenuOpen(false); setRestartConfirmationOpen(false); }, [snapshot?.selectedDeviceId]);
   const records = useMemo(() => { const all = snapshot?.console ?? []; const filtered = query ? all.filter((line) => `${line.stream} ${line.text}`.toLowerCase().includes(query.toLowerCase())) : all; return filtered.slice(-MAX_RENDERED_LINES); }, [snapshot?.console, query]);
   const run = snapshot?.run;
+  useEffect(() => {
+    if (run?.state !== "failed") return;
+    setTab("console"); setFollow(true); setQuery(""); setDismissedError(null);
+  }, [run?.state, run?.startedAt, snapshot?.selectedDeviceId]);
   const running = run?.state === "running";
   const active = Boolean(run && ["starting", "running", "reloading", "restarting", "stopping"].includes(run.state));
   const anyActive = Boolean(snapshot?.sessions.some((session) => ["starting", "running", "reloading", "restarting", "stopping"].includes(session.state)));
-  const selectedDevice = snapshot?.devices.find((item) => item.id === snapshot.selectedDeviceId);
+  const availableDevice = snapshot?.devices.find((item) => item.id === snapshot.selectedDeviceId);
+  const selectedDevice = availableDevice ?? snapshot?.selectedDevice;
+  const deviceOptions = selectedDevice && !availableDevice ? [...(snapshot?.devices ?? []), selectedDevice] : snapshot?.devices ?? [];
   const selectedProject = snapshot?.projects.find((item) => item.path === snapshot.binding.flutterProjectPath);
+  const devicesLoading = (!snapshot && !connect.error) || connect.loading || refresh.loading;
   const busy = !snapshot || connect.loading || refresh.loading || selectProject.loading || selectDevice.loading || saveLaunchParameters.loading || startRun.loading || reinstallRun.loading || controlRun.loading;
-  const canStart = Boolean(snapshot?.binding.flutterProjectPath && selectedDevice && (!run || ["idle", "stopped", "detached", "failed"].includes(run.state)));
+  const canStart = Boolean(snapshot?.binding.flutterProjectPath && availableDevice && (!run || ["idle", "stopped", "detached", "failed"].includes(run.state)));
   const debugSession = run?.mode === "debug";
-  const canHotRestart = Boolean(running && debugSession && selectedDevice?.capabilities.hotRestart);
+  const canHotRestart = Boolean(running && debugSession && availableDevice?.capabilities.hotRestart);
   const canReinstall = Boolean(canHotRestart && snapshot?.binding.flutterProjectPath && selectedDevice && supportsAppReinstall(selectedDevice));
   const visibleMedia = (snapshot?.media ?? []).filter((item) => item.deviceId === snapshot?.selectedDeviceId);
   const recording = snapshot?.recording;
@@ -131,18 +142,18 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
   const recordingBusy = startRecording.loading || stopRecording.loading;
   const recordingLive = Boolean(recording && ["starting", "recording", "stopping", "finalizing"].includes(recording.state));
   const ownsRecording = recording?.ownedByPanel !== false;
-  const androidTarget = selectedDevice?.platform.toLowerCase().includes("android") ?? false;
+  const androidTarget = availableDevice?.platform.toLowerCase().includes("android") ?? false;
   const recordingElapsed = recording?.startedAt ? Math.max(0, Math.floor((clock - Date.parse(recording.startedAt)) / 1_000)) : 0;
   const recordControl = recordingControl({ deviceName: selectedDevice?.name, platform: selectedDevice?.platform, state: recording?.state, ownedByPanel: ownsRecording, elapsedSeconds: recordingElapsed, busy: recordingBusy || busy });
   const runningCount = snapshot?.sessions.filter((session) => session.state === "running").length ?? 0;
   const savedParameterCount = snapshot?.launchParameters.dartDefines.length ?? 0;
   const enabledParameterCount = snapshot?.launchParameters.dartDefines.filter((define) => define.enabled).length ?? 0;
-  const currentError = message ?? recording?.error ?? snapshot?.toolError ?? connect.error?.message ?? refresh.error?.message ?? openSettings.error?.message ?? selectProject.error?.message ?? saveLaunchParameters.error?.message ?? selectDevice.error?.message ?? startRun.error?.message ?? reinstallRun.error?.message ?? controlRun.error?.message ?? screenshot.error?.message ?? copyScreenshot.error?.message ?? startRecording.error?.message ?? stopRecording.error?.message ?? openMedia.error?.message ?? revealMedia.error?.message ?? deleteMedia.error?.message ?? null;
+  const currentError = message ?? run?.error ?? recording?.error ?? snapshot?.toolError ?? connect.error?.message ?? refresh.error?.message ?? openSettings.error?.message ?? selectProject.error?.message ?? saveLaunchParameters.error?.message ?? selectDevice.error?.message ?? startRun.error?.message ?? reinstallRun.error?.message ?? controlRun.error?.message ?? screenshot.error?.message ?? copyScreenshot.error?.message ?? startRecording.error?.message ?? stopRecording.error?.message ?? openMedia.error?.message ?? revealMedia.error?.message ?? deleteMedia.error?.message ?? null;
   const error = currentError === dismissedError ? null : currentError;
 
-  const refreshWorkspace = async (): Promise<void> => { setMessage(null); setDismissedError(null); const next = await refresh.invoke(baseArgs); if (next) setSnapshot(next); };
-  const changeDevice = async (deviceId: string): Promise<void> => { setMessage(null); setFollow(true); const next = await selectDevice.invoke({ ...baseArgs, deviceId }); if (next) { expectedSequence.current = next.sequence; setSnapshot(next); } };
-  const changeProject = async (projectPath: string): Promise<void> => { if (!projectPath) return; setMessage(null); const result = await selectProject.invoke({ ...baseArgs, projectPath }); if (result) { const next = await connect.invoke(baseArgs); if (next) setSnapshot(next); setShowLaunchParameters(false); setShowSettings(false); } };
+  const refreshWorkspace = async (): Promise<void> => { setMessage(null); setDismissedError(null); acceptSnapshot(await refresh.invoke(baseArgs)); };
+  const changeDevice = async (deviceId: string): Promise<void> => { setMessage(null); setFollow(true); acceptSnapshot(await selectDevice.invoke({ ...baseArgs, deviceId })); };
+  const changeProject = async (projectPath: string): Promise<void> => { if (!projectPath) return; setMessage(null); const result = await selectProject.invoke({ ...baseArgs, projectPath }); if (result) { acceptSnapshot(await connect.invoke(baseArgs)); setShowLaunchParameters(false); setShowSettings(false); } };
   const persistLaunchParameters = async (launchParameters: LaunchParameters): Promise<boolean> => {
     setMessage(null); setDismissedError(null);
     const saved = await saveLaunchParameters.invoke({ ...baseArgs, launchParameters });
@@ -164,7 +175,7 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
     if (result) {
       setPreviews((current) => { const next = { ...current }; delete next[item.filePath]; return next; });
       setNotice(result.message);
-      const next = await connect.invoke(baseArgs); if (next) setSnapshot(next);
+      acceptSnapshot(await connect.invoke(baseArgs));
     }
     setDeletingPath(null); setPendingDelete(null);
   };
@@ -178,7 +189,7 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
     setMessage(null); setDismissedError(null);
     const result = recordingLive ? await stopRecording.invoke({ ...baseArgs, deviceId: selectedDevice.id }) : await startRecording.invoke({ ...baseArgs, deviceId: selectedDevice.id });
     if (result) { setNotice(result.message); if (recordingLive) setTab("media"); }
-    const next = await connect.invoke(baseArgs); if (next) setSnapshot(next);
+    acceptSnapshot(await connect.invoke(baseArgs));
   };
   const cancelRunHold = (): void => { if (runHoldTimer.current) clearTimeout(runHoldTimer.current); runHoldTimer.current = null; };
   const openRunMenu = (): void => {
@@ -233,38 +244,39 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
       <button type="button" className={`ft-params-summary-btn ${enabledParameterCount ? "active" : ""}`} disabled={!snapshot?.binding.flutterProjectPath} onClick={() => setShowLaunchParameters(true)}>
         <span className="ft-param-mark" aria-hidden="true">&#123; &#125;</span><span><strong>Launch parameters</strong><small>{savedParameterCount ? `${enabledParameterCount} set · ${savedParameterCount} saved` : "Default Flutter launch"}</small></span><b>Edit</b>
       </button>
+      <UI.Button type="button" size="xs" variant="secondary" icon="sliders-horizontal" disabled={!snapshot?.binding.flutterProjectPath} onClick={() => setShowAppSettings(true)}>App settings</UI.Button>
       <UI.Button type="button" size="xs" variant="secondary" icon="settings" className="ft-plugin-settings-btn" loading={openSettings.loading} disabled={openSettings.loading} onClick={() => void openSettings.invoke(baseArgs)}>Plugin settings</UI.Button>
     </section> : null}
     <div className="ft-launch-bar">
-      <label className="ft-device-picker"><span>Target</span><UI.Select className="ft-device-select" aria-label="Flutter target device" density="compact" value={snapshot?.selectedDeviceId ?? ""} placeholder={snapshot?.devices.length ? "Select target…" : "No devices detected"} disabled={!snapshot || !snapshot.devices.length || busy} onValueChange={(value) => void changeDevice(value)} options={(snapshot?.devices ?? []).map((device) => { const session = snapshot?.sessions.find((item) => item.deviceId === device.id); const state = session?.state ?? "idle"; const mode = session?.mode; const live = ["starting", "running", "reloading", "restarting", "stopping"].includes(state); return { value: device.id, label: `${live ? "● " : ""}${device.name}`, description: `${device.platform}${device.emulator ? " · emulator" : ""}${state !== "idle" ? ` · ${state}` : ""}${live && mode && mode !== "debug" ? ` · ${mode}` : ""}` }; })}/></label>
-      <span className="ft-device-count">{snapshot?.devices.length ?? 0} available</span>
+      <label className="ft-device-picker" aria-busy={devicesLoading}><span>Target</span>{devicesLoading && <UI.Spinner size="xs"/>}<UI.Select className="ft-device-select" aria-label="Flutter target device" density="compact" value={snapshot?.selectedDeviceId ?? ""} placeholder={devicesLoading ? "Finding devices…" : connect.error && !snapshot ? "Devices unavailable" : snapshot?.devices.length ? "Select target…" : "No devices detected"} disabled={!snapshot || !deviceOptions.length || busy} onValueChange={(value) => void changeDevice(value)} options={deviceOptions.map((device) => { const session = snapshot?.sessions.find((item) => item.deviceId === device.id); const state = session?.state ?? "idle"; const mode = session?.mode; const live = ["starting", "running", "reloading", "restarting", "stopping"].includes(state); return { value: device.id, label: `${live ? "● " : ""}${device.name}`, description: `${device.platform}${!snapshot?.devices.some((item) => item.id === device.id) ? " · unavailable" : ""}${device.emulator ? " · emulator" : ""}${state !== "idle" ? ` · ${state}` : ""}${live && mode && mode !== "debug" ? ` · ${mode}` : ""}` }; })}/></label>
+      <span className="ft-device-count" role="status">{devicesLoading ? "Finding devices…" : `${snapshot?.devices.length ?? 0} available`}</span>
       {savedParameterCount ? <UI.Button type="button" size="xs" variant={enabledParameterCount ? "subtle" : "ghost"} icon="braces" className="ft-param-chip" title={`${enabledParameterCount} set · ${savedParameterCount} saved launch ${savedParameterCount === 1 ? "parameter" : "parameters"}`} aria-label={`Edit launch parameters. ${enabledParameterCount} set, ${savedParameterCount} saved.`} onClick={() => setShowLaunchParameters(true)}>Params <UI.Badge size="xs" tone={enabledParameterCount ? "info" : "neutral"}>{enabledParameterCount}</UI.Badge></UI.Button> : null}<span className="ft-spacer"/>
       <IconButton icon="refresh" label="Refresh projects and devices" disabled={busy} onClick={() => void refreshWorkspace()}/>
-      {active && selectedDevice ? <IconButton icon="stop" label={`Stop Flutter application on ${selectedDevice.name}`} tone="danger" disabled={busy || run?.state === "stopping"} onClick={() => void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "stop" })}/>
+      {active && selectedDevice ? <IconButton icon="stop" label={run?.state === "starting" ? `Abort Flutter build and deployment on ${selectedDevice.name}` : `Stop Flutter application on ${selectedDevice.name}`} tone="danger" disabled={controlRun.loading || run?.state === "stopping"} onClick={() => void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "stop" })}/>
       : <div ref={runActionRef} className="ft-run-action">
         <UI.IconButton type="button" size="sm" variant="outline" icon="play" tooltip={selectedDevice ? `Run debug build on ${selectedDevice.name}. Hold or right-click for release.` : "Select a target to run"} aria-label={selectedDevice ? `Run debug build on ${selectedDevice.name}. Hold or right-click for release options.` : "Select a target to run"} aria-haspopup="menu" aria-expanded={runMenuOpen} disabled={!canStart || busy || !selectedDevice} onPointerDown={beginRunHold} onPointerUp={cancelRunHold} onPointerCancel={cancelRunHold} onPointerLeave={cancelRunHold} onContextMenu={(event) => { event.preventDefault(); openRunMenu(); }} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); openRunMenu(); } }} onClick={runDebug}/>
         {runMenuOpen ? <div className="ft-run-popover" role="menu" aria-label="Flutter launch modes">
           <span>ALTERNATE LAUNCH</span>
           <button type="button" className="ft-run-option" role="menuitem" autoFocus onClick={() => launch("release")}>
-            <span className="ft-release-mark">R</span><span><strong>Install &amp; run release</strong><small>Optimized build · debugging and hot reload unavailable</small></span>
+            <span className="ft-release-mark">R</span><span><strong>Build &amp; install release</strong><small>Launches unattached · no development controls</small></span>
           </button>
         </div> : null}
       </div>}
     </div>
     <div className={`ft-session-bar ${restartConfirmationOpen ? "popover-open" : ""}`}>
-      <span className={`ft-state ${run?.state ?? "idle"}`}><i/>{run?.state ?? "idle"}{active && run?.mode === "release" ? <b className="ft-mode-badge">release</b> : null}</span>
+      <span className={`ft-state ${run?.state ?? "idle"}`}><i/>{run?.state ?? "idle"}{run?.mode === "release" ? <b className="ft-mode-badge">release</b> : null}</span>
       <span className="ft-session-target" title={selectedDevice?.id}>{selectedDevice?.name ?? "No device selected"}</span>
       {run?.appId ? <span className="ft-app-id" title={run.appId}>{run.appId}</span> : null}<span className="ft-spacer"/>
-      <IconButton icon="reload" label={run?.mode === "release" ? "Hot reload is unavailable for release builds" : "Hot reload"} disabled={!running || !debugSession || !selectedDevice?.capabilities.hotReload || busy} onClick={() => selectedDevice && void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "hotReload" })}/>
+      {run?.mode !== "release" ? <><IconButton icon="reload" label="Hot reload" disabled={!running || !debugSession || !selectedDevice?.capabilities.hotReload || busy} onClick={() => selectedDevice && void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "hotReload" })}/>
       <div ref={restartActionRef} className="ft-restart-action">
         <UI.IconButton type="button" size="xs" variant="ghost" icon="rotate-ccw" aria-label="Hot restart" tooltip="Hot restart. Hold to reinstall the app and delete its data." disabled={!canHotRestart || busy} onPointerDown={beginRestartHold} onPointerUp={cancelRestartHold} onPointerCancel={cancelRestartHold} onPointerLeave={cancelRestartHold} onClick={hotRestart}/>
       </div>
-      <IconButton icon="devtools" label={run?.mode === "release" ? "DevTools is unavailable for release builds" : "Open Flutter DevTools"} disabled={!debugSession || !(run?.devToolsUri || run?.vmServiceUri) || busy} onClick={() => selectedDevice && void openDevTools.invoke({ ...baseArgs, deviceId: selectedDevice.id })}/>
+      <IconButton icon="devtools" label="Open Flutter DevTools" disabled={!debugSession || !(run?.devToolsUri || run?.vmServiceUri) || busy} onClick={() => selectedDevice && void openDevTools.invoke({ ...baseArgs, deviceId: selectedDevice.id })}/></> : null}
       <div className="ft-capture-cluster" aria-label="Device media controls">
-        <IconButton icon="camera" label="Capture device screenshot" disabled={!selectedDevice?.capabilities.screenshot || busy || screenshot.loading} onClick={() => void capture()}/>
+        <IconButton icon="camera" label="Capture device screenshot" disabled={!availableDevice?.capabilities.screenshot || busy || screenshot.loading} onClick={() => void capture()}/>
         {recordControl.active ? <UI.Button type="button" size="xs" variant="ghost-danger" icon="square" pressed aria-label={recordControl.title} disabled={recordControl.disabled} onClick={() => void toggleRecording()}>{recordControl.label}</UI.Button> : <UI.IconButton type="button" size="xs" variant="ghost-danger" icon="circle" aria-label={recordControl.title} disabled={recordControl.disabled} onClick={() => void toggleRecording()}/>}
       </div>
-      <IconButton icon="detach" label="Detach debugger and leave application running" disabled={!running || busy} onClick={() => selectedDevice && void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "detach" })}/>
+      {run?.mode !== "release" ? <IconButton icon="detach" label="Detach debugger and leave application running" disabled={!running || busy} onClick={() => selectedDevice && void controlRun.invoke({ ...baseArgs, deviceId: selectedDevice.id, operation: "detach" })}/> : null}
     </div>
     <UI.ConfirmDialog open={restartConfirmationOpen} onClose={() => setRestartConfirmationOpen(false)} onConfirm={confirmReinstall} title={`Reinstall on ${selectedDevice?.name ?? "this device"}?`} description="Flutter Tools will remove the installed app and all of its local data, then install and launch it again with the same run configuration." confirmLabel="Delete data & reinstall" variant="destructive" icon="rotate-ccw" loading={reinstallRun.loading}><strong>Preferences, databases, caches, and signed-in state on the device will be permanently lost.</strong> Project source files and remote data are not affected.</UI.ConfirmDialog>
     {error ? <UI.Callout variant="strip" size="compact" severity="error" role="alert" onDismiss={() => setDismissedError(error)} dismissLabel="Dismiss error">{error}</UI.Callout> : null}
@@ -272,6 +284,7 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
     <UI.Dialog open={Boolean(pendingDelete)} onClose={() => setPendingDelete(null)} title={`Remove ${pendingDelete?.kind === "recording" ? "recording" : "screenshot"}?`} icon="trash" size="sm" dismissible={!deleteMedia.loading} footer={pendingDelete ? <><UI.Button type="button" size="sm" variant="ghost" disabled={deleteMedia.loading} onClick={() => setPendingDelete(null)}>Cancel</UI.Button><UI.Button type="button" size="sm" variant="secondary" loading={deleteMedia.loading && deletingPath === pendingDelete.filePath} disabled={deleteMedia.loading} onClick={() => void removeMedia(pendingDelete, false)}>Remove reference</UI.Button><UI.Button type="button" size="sm" variant="destructive" loading={deleteMedia.loading && deletingPath === pendingDelete.filePath} disabled={deleteMedia.loading} onClick={() => void removeMedia(pendingDelete, true)}>Delete file</UI.Button></> : null}>
       {pendingDelete ? <div className="ft-native-dialog-copy"><p>Removing the reference keeps the saved file. Deleting the file permanently removes the single saved copy as well.</p><code title={pendingDelete.filePath}>{pendingDelete.filePath}</code></div> : null}
     </UI.Dialog>
+    {showAppSettings && snapshot?.binding.flutterProjectPath ? <AppSettingsDialog key={snapshot.binding.flutterProjectPath} pluginId={pluginId} panelId={panelId} initialArgs={initialArgs} projectPath={snapshot.binding.flutterProjectPath} projectName={selectedProject?.name ?? "Flutter project"} onClose={() => setShowAppSettings(false)}/> : null}
     {showLaunchParameters && snapshot ? <LaunchParametersEditor key={`${snapshot.binding.flutterProjectPath}:${snapshot.launchParameters.dartDefines.map((define) => `${define.key}:${define.value}:${define.enabled}`).join("|")}`} parameters={snapshot.launchParameters} projectName={selectedProject?.name ?? "Flutter project"} running={anyActive} saving={saveLaunchParameters.loading} onCancel={() => setShowLaunchParameters(false)} onSave={persistLaunchParameters}/> : null}
     <main className="ft-main">
       <UI.Tabs className="ft-tabs-native" items={[{ value: "console", label: "Console", icon: "terminal", badge: snapshot?.console.length ?? 0 }, { value: "media", label: "Media", icon: "image", badge: visibleMedia.length }]} value={tab} onValueChange={(value) => setTab(value as Tab)} aria-label="Flutter Tools views" density="strip"/>
@@ -289,6 +302,6 @@ export default function FlutterToolsPanel({ panelId, pluginId, initialArgs }: Pa
         </article>;
       })}</section>}
     </main>
-    <UI.StatusBar className="ft-toolchain-native" left={[<span key="sdk"><UI.Badge size="xs" tone={snapshot?.sdk ? "success" : "error"}>Flutter {snapshot?.sdk?.version ?? "unavailable"}</UI.Badge></span>, <span key="source">{snapshot?.sdk?.source ? snapshot.sdk.source.toUpperCase() : "UNRESOLVED"}</span>, <span key="path" className="ft-tool-path" title={snapshot?.sdk?.executable}>{snapshot?.sdk?.executable ?? "Flutter executable not resolved"}</span>]} right={`${runningCount} running · ${snapshot?.devices.length ?? 0} device${snapshot?.devices.length === 1 ? "" : "s"}`}/>
+    <UI.StatusBar className="ft-toolchain-native" left={[<span key="sdk"><UI.Badge size="xs" tone={snapshot?.sdk ? "success" : "error"}>Flutter {snapshot?.sdk?.version ?? "unavailable"}</UI.Badge></span>, <span key="source">{snapshot?.sdk?.source ? snapshot.sdk.source.toUpperCase() : "UNRESOLVED"}</span>, <span key="path" className="ft-tool-path" title={snapshot?.sdk?.executable}>{snapshot?.sdk?.executable ?? "Flutter executable not resolved"}</span>]} right={devicesLoading ? "Finding devices…" : `${runningCount} running · ${snapshot?.devices.length ?? 0} device${snapshot?.devices.length === 1 ? "" : "s"}`}/>
   </div>;
 }

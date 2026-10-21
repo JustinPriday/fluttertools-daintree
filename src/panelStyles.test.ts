@@ -14,6 +14,11 @@ describe("Flutter Tools panel layout policy", () => {
     expect(panelStyles).not.toMatch(/#[0-9a-f]{3,8}/i);
   });
 
+  it("does not override UI Kit control foreground roles", () => {
+    expect(panelStyles).not.toMatch(/\.ft-root\s+(?:button|select|input)[^{]*\{[^}]*color\s*:\s*inherit/);
+    expect(panelStyles).toContain(".ft-root button,.ft-root select,.ft-root input{font:inherit}");
+  });
+
   it("keeps fixed controls from starving the console in short panels", () => {
     expect(panelStyles).toContain(".ft-repo-bar,.ft-launch-bar,.ft-session-bar{display:flex;min-width:0;flex:0 0 auto");
     expect(panelStyles).toContain(".ft-main{display:flex;width:100%;min-width:0;min-height:0;flex:1 1 0;height:0");

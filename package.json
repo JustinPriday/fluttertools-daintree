@@ -9,6 +9,7 @@
     "build": "node tools/clean-dist.mjs && vite build && node tools/check-panel-bundle.mjs && vite build --config vite.config.worker.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "app-settings:verify": "node tools/verify-app-settings.mjs",
     "layout:verify": "node tools/verify-panel-layout.mjs",
     "validate": "daintree-plugin validate",
     "audit": "node .agents/skills/create-daintree-plugin/scripts/audit_plugin.mjs .",

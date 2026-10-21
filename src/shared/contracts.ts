@@ -85,6 +85,7 @@ export const snapshotSchema = z.object({
   projects: z.array(projectSchema),
   devices: z.array(deviceSchema),
   selectedDeviceId: z.string().nullable(),
+  selectedDevice: deviceSchema.nullable().default(null),
   sdk: z.object({ executable: z.string(), source: z.enum(["setting", "fvm", "path"]), version: z.string().nullable() }).nullable(),
   toolError: z.string().nullable(),
   launchParameters: launchParametersSchema.default({ dartDefines: [] }),

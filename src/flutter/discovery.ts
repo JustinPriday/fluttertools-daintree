@@ -12,6 +12,13 @@ const execFileAsync = promisify(execFile);
 async function isFlutterProject(directory: string): Promise<boolean> {
   try {
     const pubspec = await readFile(path.join(directory, "pubspec.yaml"), "utf8");
+    // A native plugin depends on Flutter but cannot be launched as an app.
+    // Keep walking its children so a runnable example app is still discovered.
+    let inFlutterSettings = false;
+    for (const line of pubspec.split(/\r?\n/)) {
+      if (/^[^\s#]/.test(line)) inFlutterSettings = /^flutter[ \t]*:/.test(line);
+      if (inFlutterSettings && /^[ \t]+plugin[ \t]*:/.test(line)) return false;
+    }
     return /^\s*flutter\s*:\s*$/m.test(pubspec) || /^\s*sdk\s*:\s*flutter\s*$/m.test(pubspec);
   } catch {
     return false;

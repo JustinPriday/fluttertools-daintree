@@ -12,6 +12,7 @@
   "capabilities": [
     "shell:exec",
     "fs:project-read",
+    "fs:project-write",
     "fs:user-data-write",
     "clipboard:write"
   ],

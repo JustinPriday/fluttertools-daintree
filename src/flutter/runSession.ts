@@ -16,7 +16,9 @@ export interface RunSessionSnapshot {
 }
 
 export function buildRunArguments(options: { deviceId: string; mode: RunMode; entrypoint?: string; extraArgs?: string[] }): string[] {
-  const args = ["run", "--machine", "-d", options.deviceId];
+  // Machine mode always stays resident, even with --no-resident. Release
+  // launches use the regular CLI so Flutter exits and leaves the app running.
+  const args = options.mode === "release" ? ["run", "--no-resident", "-d", options.deviceId] : ["run", "--machine", "-d", options.deviceId];
   if (options.mode !== "debug") args.push(`--${options.mode}`);
   if (options.entrypoint?.trim()) args.push("-t", options.entrypoint.trim());
   args.push(...(options.extraArgs ?? []));
@@ -39,7 +41,7 @@ export class FlutterRunSession extends EventEmitter {
     this.machine.on("exit", (code: number | null) => {
       if (this.snapshot.state === "detached") return;
       if (this.snapshot.state !== "stopping" && this.snapshot.state !== "stopped" && code !== 0) this.fail(new Error(`Flutter run exited with code ${code ?? "unknown"}`));
-      else this.update({ state: "stopped" });
+      else this.update({ state: this.snapshot.mode === "release" && this.snapshot.state !== "stopping" && code === 0 ? "detached" : "stopped" });
     });
   }
 
@@ -58,9 +60,11 @@ export class FlutterRunSession extends EventEmitter {
 
   async stop(): Promise<void> {
     if (!this.machine.running) { this.update({ state: "stopped" }); return; }
+    const aborting = this.snapshot.state === "starting";
     this.update({ state: "stopping" });
     await this.machine.close(this.snapshot.appId ? "app.stop" : undefined, this.snapshot.appId ? { appId: this.snapshot.appId } : {});
-    this.update({ state: "stopped" });
+    this.update({ state: "stopped", error: null });
+    if (aborting) this.emit("output", "system", "Flutter build and deployment cancelled.");
   }
 
   async detach(): Promise<void> {

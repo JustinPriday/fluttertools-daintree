@@ -20,6 +20,19 @@ describe("Flutter discovery", () => {
     expect(projects.map((project) => project.name)).toEqual(["root_app", "mobile"]);
   });
 
+  it("excludes native plugins while retaining their runnable example apps", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "flutter-tools-plugin-")); temporary.push(root);
+    await writeFile(path.join(root, "pubspec.yaml"), "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n");
+    const plugin = path.join(root, "packages", "native_badges");
+    const example = path.join(plugin, "example");
+    await mkdir(example, { recursive: true });
+    await writeFile(path.join(plugin, "pubspec.yaml"), "name: native_badges\ndependencies:\n  flutter:\n    sdk: flutter\nflutter: # native library\n  plugin:\n    platforms:\n      ios:\n        pluginClass: NativeBadgesPlugin\n");
+    await writeFile(path.join(example, "pubspec.yaml"), "name: example_app\ndependencies:\n  flutter:\n    sdk: flutter\nflutter:\n  uses-material-design: true\n");
+    const projects = await discoverFlutterProjects(root, 5);
+    expect(projects.map((project) => project.relativePath)).toEqual([".", path.join("packages", "native_badges", "example")]);
+    expect(projects.map((project) => project.name)).toEqual(["app", "example_app"]);
+  });
+
   it("prefers the configured SDK over FVM and PATH", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "flutter-tools-sdk-")); temporary.push(root);
     const sdk = path.join(root, "sdk"); await mkdir(path.join(sdk, "bin"), { recursive: true });
